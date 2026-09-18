@@ -18,7 +18,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::osc::Event;
+use crate::osc::{Event, Voice};
 use crate::scene::{self, Scene};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -34,6 +34,7 @@ struct App {
     last_event: Option<Event>,
     beat: f32,
     level: f32,
+    voice_levels: [f32; Voice::ALL.len()],
 }
 
 impl App {
@@ -43,6 +44,7 @@ impl App {
             Event::Kick(_) => self.kicks += 1,
             Event::Beat(b) => self.beat = *b,
             Event::Level(l) => self.level = *l,
+            Event::VoiceLevel(voice, l) => self.voice_levels[*voice as usize] = *l,
             Event::Unknown(_) => self.unknown += 1,
             Event::Chord { .. } => {}
         }
@@ -88,8 +90,8 @@ impl App {
     }
 
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
-        let width = 52.min(area.width);
-        let height = 10.min(area.height);
+        let width = 72.min(area.width);
+        let height = 11.min(area.height);
         let panel = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
@@ -114,6 +116,13 @@ impl App {
                 "beat     {:.2}   level {:.3}",
                 self.beat, self.level
             )),
+            Line::from(
+                Voice::ALL
+                    .iter()
+                    .map(|v| format!("{} {:.3}", v.name(), self.voice_levels[*v as usize]))
+                    .collect::<Vec<_>>()
+                    .join("  "),
+            ),
             Line::from(format!("received {}", self.received)),
             Line::from(format!("kicks    {}", self.kicks)),
             Line::from(format!("unknown  {}", self.unknown)),
@@ -163,6 +172,7 @@ fn event_loop(
         last_event: None,
         beat: 0.0,
         level: 0.0,
+        voice_levels: [0.0; Voice::ALL.len()],
     };
     let mut last_frame = Instant::now();
     loop {

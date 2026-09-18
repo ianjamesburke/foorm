@@ -33,8 +33,12 @@ What every scene shares:
   by the hit's level, so a kick at zero volume draws nothing.
 - Colour follows the chord the way the pad does: the new chord's tint swells
   in over its attack while the old one fades over its release.
-- Ambient motion follows the master level. Silence is still, whatever the
-  tempo is doing.
+- Every voice drives something. Pad sets the flow, bass the floor or water
+  height, perc and clap the rhythm cursor and rain rate, tonal, arp and lead
+  the shimmer. Silence is still, whatever the tempo is doing.
+- Sensitivity is one table (`Sensitivity` in `src/scene.rs`), calibrated
+  from nooise's built-in songs. Recalibrate with nooise's
+  `song_level_profile` test when the mix changes.
 
 ## Address vocabulary
 
@@ -42,6 +46,8 @@ foorm consumes the nooise contract documented in nooise's `src/fluid/osc.rs`:
 
 - `/nooise/beat` `f32` beat position
 - `/nooise/level` `f32` master output RMS
+- `/nooise/voice/<voice>/level` `f32` per-voice RMS as it enters the mix
+  (`pad`, `perc`, `bass`, `kick`, `tonal`, `clap`, `arp`, `lead`)
 - `/nooise/chord` `i32 f32 f32` chord index, pad attack and release seconds
 - `/nooise/voice/kick` `f32` kick level
 

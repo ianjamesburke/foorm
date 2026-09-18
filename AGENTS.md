@@ -30,8 +30,12 @@ The OSC address vocabulary is the only contract between them.
 - Colour comes from `Pulse::hue()`, never from a chord index directly: each
   chord is a layer that swells over its attack and fades over its release,
   mirroring the pad.
-- Ambient motion scales with `Pulse::drive`, so silence is still; the beat
-  alone never animates anything.
+- Ambient motion scales with per-voice drives from `Pulse::voice`, `rhythm`,
+  and `melody`, falling back to the master `drive`; silence is still and the
+  beat alone never animates anything.
+- Every level threshold lives in `Sensitivity`, calibrated from nooise's
+  `song_level_profile` output and dated in its doc comment. Scenes never
+  hard-code an RMS. This table is where per-scene user settings will attach.
 - Heavy rendering belongs here, never in nooise: foorm exists so the producer
   stays light.
 

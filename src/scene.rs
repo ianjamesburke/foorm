@@ -4,7 +4,8 @@
 //! The kick is the anchor of every scene: same place, same motion, every hit,
 //! with at most one cell of analog wobble so it reads as played, not looped.
 //! Its size follows the hit's level, so an inaudible kick is invisible too.
-//! Ambient motion follows the master level: silence is still.
+//! Ambient motion follows each voice's level through `Sensitivity`: silence
+//! is still, and every layer nooise plays has something on screen.
 
 use std::f32::consts::TAU;
 
@@ -12,7 +13,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 
-use crate::osc::Event;
+use crate::osc::{Event, Voice};
 
 pub trait Scene {
     fn name(&self) -> &'static str;
@@ -34,8 +35,43 @@ pub fn all() -> Vec<Box<dyn Scene>> {
 const GRADIENT: &[char] = &[' ', '·', '∙', '•', '●', '◉', '⬤'];
 const HUES: [f32; 5] = [205.0, 270.0, 325.0, 158.0, 38.0];
 
-/// Master RMS that counts as fully driven; nooise's mix sits well under 1.0.
-const FULL_LEVEL: f32 = 0.2;
+/// RMS at which a voice counts as fully driven. Calibrated from nooise's
+/// built-in songs (`song_level_profile` in nooise's `src/fluid/osc.rs`,
+/// 2026-09-18, songs 1-16): roughly each voice's p90 while active. Lead was
+/// silent in every profiled song and carries a guess. The future per-scene
+/// settings UI edits this table; nothing else in a scene hard-codes a level.
+#[derive(Clone, Copy)]
+pub struct Sensitivity {
+    /// Indexed by `Voice`.
+    voices: [f32; Voice::ALL.len()],
+    master: f32,
+}
+
+impl Default for Sensitivity {
+    fn default() -> Self {
+        Self {
+            voices: [
+                0.06,  // pad
+                0.002, // perc
+                0.2,   // bass
+                0.05,  // kick
+                0.04,  // tonal
+                0.012, // clap
+                0.05,  // arp
+                0.05,  // lead (uncalibrated)
+            ],
+            master: 0.08,
+        }
+    }
+}
+
+impl Sensitivity {
+    /// 0..1 drive for a level: square-root law so quiet material still
+    /// registers, saturating at the calibrated full level.
+    fn drive(full: f32, level: f32) -> f32 {
+        (level / full.max(1e-6)).clamp(0.0, 1.0).sqrt()
+    }
+}
 
 /// One cell of wobble per hit, in cells, derived from the hit count so the
 /// same hit lands the same way in every scene.
@@ -82,11 +118,16 @@ struct Pulse {
     live: Vec<Hit>,
     chords: Vec<ChordLayer>,
     beat: f32,
+    sensitivity: Sensitivity,
     /// Master RMS as last reported.
     level: f32,
-    /// `level` followed with a fast rise and slow fall, 0..1 against
-    /// `FULL_LEVEL`: what ambient motion runs on.
+    /// Per-voice RMS as last reported.
+    voice_levels: [f32; Voice::ALL.len()],
+    /// `level` followed with a fast rise and slow fall, 0..1: what ambient
+    /// motion runs on.
     drive: f32,
+    /// Per-voice followed drives, same law as `drive`.
+    voice_drives: [f32; Voice::ALL.len()],
 }
 
 impl Pulse {
@@ -120,6 +161,7 @@ impl Pulse {
             }
             Event::Beat(b) => self.beat = *b,
             Event::Level(l) => self.level = *l,
+            Event::VoiceLevel(voice, l) => self.voice_levels[*voice as usize] = *l,
             Event::Unknown(_) => {}
         }
     }
@@ -134,9 +176,41 @@ impl Pulse {
         }
         self.chords
             .retain(|layer| layer.released_at.is_none() || layer.weight() > 0.0);
-        let target = (self.level / FULL_LEVEL).clamp(0.0, 1.0);
-        let rate = if target > self.drive { 12.0 } else { 2.0 };
-        self.drive += (target - self.drive) * (rate * dt).min(1.0);
+        Self::follow(
+            &mut self.drive,
+            Sensitivity::drive(self.sensitivity.master, self.level),
+            dt,
+        );
+        for (i, drive) in self.voice_drives.iter_mut().enumerate() {
+            let target = Sensitivity::drive(self.sensitivity.voices[i], self.voice_levels[i]);
+            Self::follow(drive, target, dt);
+        }
+    }
+
+    /// Fast rise, slow fall.
+    fn follow(drive: &mut f32, target: f32, dt: f32) {
+        let rate = if target > *drive { 12.0 } else { 2.0 };
+        *drive += (target - *drive) * (rate * dt).min(1.0);
+    }
+
+    fn voice(&self, voice: Voice) -> f32 {
+        self.voice_drives[voice as usize]
+    }
+
+    /// Strongest of the transient voices: what a rhythm cursor should follow.
+    fn rhythm(&self) -> f32 {
+        [Voice::Perc, Voice::Clap]
+            .into_iter()
+            .map(|v| self.voice(v))
+            .fold(0.0, f32::max)
+    }
+
+    /// Strongest of the melodic voices above the pad.
+    fn melody(&self) -> f32 {
+        [Voice::Tonal, Voice::Arp, Voice::Lead]
+            .into_iter()
+            .map(|v| self.voice(v))
+            .fold(0.0, f32::max)
     }
 
     fn fade(age: f32) -> f32 {
@@ -194,14 +268,17 @@ impl Scene for Fluid {
     }
     fn tick(&mut self, dt: f32) {
         self.pulse.tick(dt);
-        self.phase += dt * 0.5 * self.pulse.drive;
+        self.phase += dt * 0.6 * self.pulse.voice(Voice::Pad).max(self.pulse.drive * 0.5);
     }
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let w = area.width.max(1) as f32;
         let h = area.height.max(1) as f32;
         let z = self.phase;
         let hue = self.pulse.hue();
-        let amp = 0.25 + 0.75 * self.pulse.drive;
+        let pad = self.pulse.voice(Voice::Pad);
+        let bass = self.pulse.voice(Voice::Bass);
+        let melody = self.pulse.melody();
+        let amp = 0.2 + 0.8 * pad.max(self.pulse.drive * 0.6);
         for y in 0..area.height {
             for x in 0..area.width {
                 let nx = x as f32 / w;
@@ -209,7 +286,11 @@ impl Scene for Fluid {
                 let mut v = ((nx * 6.0 + z).sin() * (ny * 5.0 - z * 0.7).cos()
                     + ((nx * 3.3 - ny * 4.1) + z * 1.3).sin() * 0.7
                     + ((nx + ny) * 7.5 + (z * 0.9).sin() * 2.0).cos() * 0.5)
-                    * amp;
+                    * amp
+                    // melody: fine shimmer across the surface
+                    + ((nx * 23.0 + z * 4.0).sin() * (ny * 17.0 - z * 3.0).cos()) * melody * 0.8
+                    // bass: the floor swells up from the bottom
+                    + (ny * ny) * bass * 2.5;
                 for hit in &self.pulse.live {
                     let (wx, wy) = hit.wobble;
                     let cx = 0.5 + wx / w;
@@ -258,13 +339,22 @@ impl Scene for Grid {
         let rows = (area.height / Self::CELL_H).max(1);
         let beat_col = (self.pulse.beat.floor() as u64 % cols as u64) as u16;
         let hue = self.pulse.hue();
+        let pad = self.pulse.voice(Voice::Pad);
+        let bass = self.pulse.voice(Voice::Bass);
+        let rhythm = self.pulse.rhythm();
+        let melody = self.pulse.melody();
         for y in 0..area.height {
             for x in 0..area.width {
                 let col = (x / Self::CELL_W).min(cols - 1);
                 let row = (y / Self::CELL_H).min(rows - 1);
-                let mut v = 0.06;
+                // pad lights every block; melody sets a checker breathing on top
+                let checker = ((col + row) % 2) as f32;
+                let mut v = 0.05 + 0.45 * pad + 0.3 * melody * checker;
                 if col == beat_col {
-                    v += 0.3 * self.pulse.drive;
+                    v += 0.6 * rhythm.max(self.pulse.drive * 0.5);
+                }
+                if row + 1 == rows {
+                    v += 0.5 * bass;
                 }
                 for hit in &self.pulse.live {
                     let (wx, wy) = hit.wobble;
@@ -326,11 +416,13 @@ impl Scene for Orbit {
     }
     fn tick(&mut self, dt: f32) {
         self.pulse.tick(dt);
-        let speed = self.pulse.drive;
+        let speed = self.pulse.voice(Voice::Pad).max(self.pulse.drive * 0.6);
+        // bass breathes the whole system outward
+        let rest = 0.3 + 0.12 * self.pulse.voice(Voice::Bass);
         for p in &mut self.particles {
             p.0 += dt * (0.3 + p.1) * speed;
             p.1 += p.2 * dt;
-            p.2 -= (p.1 - 0.3) * 4.0 * dt; // spring back toward orbit
+            p.2 -= (p.1 - rest) * 4.0 * dt; // spring back toward orbit
             p.2 *= 1.0 - 2.5 * dt;
         }
     }
@@ -349,7 +441,7 @@ impl Scene for Orbit {
             if !(0.0..1.0).contains(&x) || !(0.0..1.0).contains(&y) {
                 continue;
             }
-            let v = (0.45 + vel.abs() * 1.5).clamp(0.0, 1.0);
+            let v = (0.3 + 0.4 * self.pulse.melody() + vel.abs() * 1.5).clamp(0.0, 1.0);
             paint(
                 buf,
                 area,
@@ -386,21 +478,24 @@ impl Scene for Tide {
     }
     fn tick(&mut self, dt: f32) {
         self.pulse.tick(dt);
-        self.phase += dt * 1.2 * self.pulse.drive;
+        self.phase += dt * 1.2 * self.pulse.voice(Voice::Pad).max(self.pulse.drive * 0.5);
     }
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let w = area.width.max(1) as f32;
         let h = area.height.max(1) as f32;
         let hue = self.pulse.hue();
-        let drive = self.pulse.drive;
+        let pad = self.pulse.voice(Voice::Pad);
+        let bass = self.pulse.voice(Voice::Bass);
+        let melody = self.pulse.melody();
+        let height = 0.08 + 0.35 * bass.max(self.pulse.drive * 0.5);
         for x in 0..area.width {
             let nx = x as f32 / w;
             // surface height in 0..1 from the bottom
-            let mut surface = 0.08
-                + 0.25 * drive
-                + drive
-                    * 0.06
-                    * ((nx * 9.0 + self.phase).sin() + (nx * 4.0 - self.phase * 0.6).cos());
+            let mut surface = height
+                + pad
+                    * 0.08
+                    * ((nx * 9.0 + self.phase).sin() + (nx * 4.0 - self.phase * 0.6).cos())
+                + melody * 0.03 * (nx * 31.0 + self.phase * 5.0).sin();
             for hit in &self.pulse.live {
                 let (wx, wy) = hit.wobble;
                 let dx = (nx - 0.5 - wx / w) * 2.0;
@@ -466,7 +561,12 @@ impl Scene for Rain {
     }
     fn tick(&mut self, dt: f32) {
         self.pulse.tick(dt);
-        self.due += dt * 40.0 * self.pulse.drive;
+        let rate = self
+            .pulse
+            .rhythm()
+            .max(self.pulse.melody())
+            .max(self.pulse.drive * 0.4);
+        self.due += dt * 50.0 * rate;
         while self.due >= 1.0 && self.drops.len() < 400 {
             self.due -= 1.0;
             let x = self.next_unit();
@@ -559,6 +659,8 @@ mod tests {
             for mut scene in all() {
                 for event in [
                     Event::Level(0.3),
+                    Event::VoiceLevel(Voice::Pad, 0.05),
+                    Event::VoiceLevel(Voice::Bass, 0.2),
                     Event::Kick(0.9),
                     chord(3, 0.5, 0.5),
                     Event::Beat(7.5),
@@ -608,13 +710,25 @@ mod tests {
     #[test]
     fn drive_follows_level_and_silence_settles_to_zero() {
         let mut pulse = Pulse::default();
-        pulse.on_event(&Event::Level(FULL_LEVEL));
+        pulse.on_event(&Event::Level(pulse.sensitivity.master));
+        pulse.on_event(&Event::VoiceLevel(Voice::Bass, 0.2));
         pulse.tick(0.5);
         assert!(pulse.drive > 0.9);
+        assert!(pulse.voice(Voice::Bass) > 0.9);
+        assert_eq!(pulse.voice(Voice::Pad), 0.0);
         pulse.on_event(&Event::Level(0.0));
+        pulse.on_event(&Event::VoiceLevel(Voice::Bass, 0.0));
         for _ in 0..100 {
             pulse.tick(0.1);
         }
         assert!(pulse.drive < 0.01);
+        assert!(pulse.voice(Voice::Bass) < 0.01);
+    }
+
+    #[test]
+    fn quiet_material_still_registers() {
+        // a voice at a tenth of its calibrated level shows at about a third
+        let d = Sensitivity::drive(0.06, 0.006);
+        assert!((d - 0.316).abs() < 0.01);
     }
 }

@@ -9,12 +9,57 @@ use std::thread;
 
 use rosc::{OscPacket, OscType, decoder};
 
+/// nooise's voices, in its own tab order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Voice {
+    Pad,
+    Perc,
+    Bass,
+    Kick,
+    Tonal,
+    Clap,
+    Arp,
+    Lead,
+}
+
+impl Voice {
+    pub const ALL: [Voice; 8] = [
+        Voice::Pad,
+        Voice::Perc,
+        Voice::Bass,
+        Voice::Kick,
+        Voice::Tonal,
+        Voice::Clap,
+        Voice::Arp,
+        Voice::Lead,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Voice::Pad => "pad",
+            Voice::Perc => "perc",
+            Voice::Bass => "bass",
+            Voice::Kick => "kick",
+            Voice::Tonal => "tonal",
+            Voice::Clap => "clap",
+            Voice::Arp => "arp",
+            Voice::Lead => "lead",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Voice> {
+        Voice::ALL.into_iter().find(|v| v.name() == name)
+    }
+}
+
 /// One decoded message from a producer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Beat(f32),
     /// Master output RMS; zero is silence whatever the tempo does.
     Level(f32),
+    /// One voice's RMS as it enters the mix.
+    VoiceLevel(Voice, f32),
     /// Chord index plus the attack and release seconds of the pad layer it
     /// voiced, so colour can move at the speed the sound does.
     Chord {
@@ -74,6 +119,14 @@ fn event_for(addr: &str, args: &[OscType]) -> Event {
             }
         }
         ("/nooise/voice/kick", [OscType::Float(l)]) => Event::Kick(*l),
+        (_, [OscType::Float(l)]) => match addr
+            .strip_prefix("/nooise/voice/")
+            .and_then(|rest| rest.strip_suffix("/level"))
+            .and_then(Voice::from_name)
+        {
+            Some(voice) => Event::VoiceLevel(voice, *l),
+            None => Event::Unknown(addr.to_string()),
+        },
         _ => Event::Unknown(addr.to_string()),
     }
 }
@@ -105,6 +158,10 @@ mod tests {
                     args: vec![OscType::Float(0.8)],
                 }),
                 OscPacket::Message(OscMessage {
+                    addr: "/nooise/voice/bass/level".into(),
+                    args: vec![OscType::Float(0.15)],
+                }),
+                OscPacket::Message(OscMessage {
                     addr: "/other".into(),
                     args: vec![],
                 }),
@@ -123,6 +180,7 @@ mod tests {
                     release: 8.0
                 },
                 Event::Kick(0.8),
+                Event::VoiceLevel(Voice::Bass, 0.15),
                 Event::Unknown("/other".into())
             ]
         );
