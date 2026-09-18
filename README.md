@@ -19,8 +19,12 @@ terminal:
 nooise --osc 127.0.0.1:9000
 ```
 
-Each kick hit spawns a ring. `Tab` or `s` opens the settings overlay (listen
-address, scene, beat, message counts, last message). `q` quits.
+Three scenes: `fluid` (a liquid surface the kick pushes a wave through),
+`grid` (blocks that flash outward from the kick), `orbit` (particles the kick
+shoves off their rings). The kick always lands at the bottom centre with at
+most one cell of wobble. Switch with `1`-`3`, `n`/`p`, or the arrow keys.
+`Tab` or `s` opens the settings overlay (listen address, scene, beat, message
+counts, last message). `q` or `Ctrl+C` quits.
 
 ## Address vocabulary
 

@@ -19,13 +19,14 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::osc::Event;
-use crate::scene::{Pulse, Scene};
+use crate::scene::{self, Scene};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
 struct App {
     listen: SocketAddr,
-    scene: Box<dyn Scene>,
+    scenes: Vec<Box<dyn Scene>>,
+    current: usize,
     settings_open: bool,
     received: u64,
     kicks: u64,
@@ -43,7 +44,9 @@ impl App {
             Event::Unknown(_) => self.unknown += 1,
             Event::Chord(_) => {}
         }
-        self.scene.on_event(&event);
+        for scene in &mut self.scenes {
+            scene.on_event(&event);
+        }
         self.last_event = Some(event);
     }
 
@@ -57,6 +60,18 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc if !self.settings_open => return false,
             KeyCode::Esc => self.settings_open = false,
             KeyCode::Tab | KeyCode::Char('s') => self.settings_open = !self.settings_open,
+            KeyCode::Char('n') | KeyCode::Right => {
+                self.current = (self.current + 1) % self.scenes.len();
+            }
+            KeyCode::Char('p') | KeyCode::Left => {
+                self.current = (self.current + self.scenes.len() - 1) % self.scenes.len();
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                let n = c.to_digit(10).unwrap_or(0) as usize;
+                if (1..=self.scenes.len()).contains(&n) {
+                    self.current = n - 1;
+                }
+            }
             _ => {}
         }
         true
@@ -64,14 +79,14 @@ impl App {
 
     fn draw(&self, f: &mut Frame) {
         let area = f.area();
-        self.scene.render(area, f.buffer_mut());
+        self.scenes[self.current].render(area, f.buffer_mut());
         if self.settings_open {
             self.draw_settings(f, area);
         }
     }
 
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
-        let width = 44.min(area.width);
+        let width = 52.min(area.width);
         let height = 10.min(area.height);
         let panel = Rect::new(
             area.x + (area.width - width) / 2,
@@ -86,7 +101,13 @@ impl App {
             .unwrap_or_else(|| "none yet".into());
         let lines = vec![
             Line::from(format!("listen   {}", self.listen)),
-            Line::from(format!("scene    {}", self.scene.name())),
+            Line::from(format!(
+                "scene    {} ({}/{}, n/p or 1-{} to switch)",
+                self.scenes[self.current].name(),
+                self.current + 1,
+                self.scenes.len(),
+                self.scenes.len()
+            )),
             Line::from(format!("beat     {:.2}", self.beat)),
             Line::from(format!("received {}", self.received)),
             Line::from(format!("kicks    {}", self.kicks)),
@@ -128,7 +149,8 @@ fn event_loop(
 ) -> Result<(), Box<dyn Error>> {
     let mut app = App {
         listen,
-        scene: Box::new(Pulse::new()),
+        scenes: scene::all(),
+        current: 0,
         settings_open: false,
         received: 0,
         kicks: 0,
@@ -142,7 +164,10 @@ fn event_loop(
             app.absorb(event);
         }
         let now = Instant::now();
-        app.scene.tick(now.duration_since(last_frame).as_secs_f32());
+        let dt = now.duration_since(last_frame).as_secs_f32();
+        for scene in &mut app.scenes {
+            scene.tick(dt);
+        }
         last_frame = now;
         terminal.draw(|f| app.draw(f))?;
 
