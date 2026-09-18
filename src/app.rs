@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -47,9 +47,13 @@ impl App {
         self.last_event = Some(event);
     }
 
-    /// Returns false when the user asked to quit.
-    fn on_key(&mut self, key: KeyCode) -> bool {
-        match key {
+    /// Returns false when the user asked to quit. Raw mode turns Ctrl+C into
+    /// a key event rather than a signal, so it is honoured here.
+    fn on_key(&mut self, key: KeyEvent) -> bool {
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+        match key.code {
             KeyCode::Char('q') | KeyCode::Esc if !self.settings_open => return false,
             KeyCode::Esc => self.settings_open = false,
             KeyCode::Tab | KeyCode::Char('s') => self.settings_open = !self.settings_open,
@@ -149,7 +153,7 @@ fn event_loop(
             }
             if let TermEvent::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
-                && !app.on_key(key.code)
+                && !app.on_key(key)
             {
                 return Ok(());
             }
