@@ -33,16 +33,18 @@ struct App {
     unknown: u64,
     last_event: Option<Event>,
     beat: f32,
+    level: f32,
 }
 
 impl App {
     fn absorb(&mut self, event: Event) {
         self.received += 1;
         match &event {
-            Event::Kick => self.kicks += 1,
+            Event::Kick(_) => self.kicks += 1,
             Event::Beat(b) => self.beat = *b,
+            Event::Level(l) => self.level = *l,
             Event::Unknown(_) => self.unknown += 1,
-            Event::Chord(_) => {}
+            Event::Chord { .. } => {}
         }
         for scene in &mut self.scenes {
             scene.on_event(&event);
@@ -108,7 +110,10 @@ impl App {
                 self.scenes.len(),
                 self.scenes.len()
             )),
-            Line::from(format!("beat     {:.2}", self.beat)),
+            Line::from(format!(
+                "beat     {:.2}   level {:.3}",
+                self.beat, self.level
+            )),
             Line::from(format!("received {}", self.received)),
             Line::from(format!("kicks    {}", self.kicks)),
             Line::from(format!("unknown  {}", self.unknown)),
@@ -157,6 +162,7 @@ fn event_loop(
         unknown: 0,
         last_event: None,
         beat: 0.0,
+        level: 0.0,
     };
     let mut last_frame = Instant::now();
     loop {

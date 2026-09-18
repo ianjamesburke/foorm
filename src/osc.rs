@@ -13,8 +13,17 @@ use rosc::{OscPacket, OscType, decoder};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Beat(f32),
-    Chord(i32),
-    Kick,
+    /// Master output RMS; zero is silence whatever the tempo does.
+    Level(f32),
+    /// Chord index plus the attack and release seconds of the pad layer it
+    /// voiced, so colour can move at the speed the sound does.
+    Chord {
+        index: i32,
+        attack: f32,
+        release: f32,
+    },
+    /// One kick hit at this `kick.level` (0 = inaudible).
+    Kick(f32),
     /// Any address foorm does not map to a shape yet.
     Unknown(String),
 }
@@ -56,8 +65,15 @@ fn events_in(packet: OscPacket) -> Vec<Event> {
 fn event_for(addr: &str, args: &[OscType]) -> Event {
     match (addr, args) {
         ("/nooise/beat", [OscType::Float(b)]) => Event::Beat(*b),
-        ("/nooise/chord", [OscType::Int(c)]) => Event::Chord(*c),
-        ("/nooise/voice/kick", _) => Event::Kick,
+        ("/nooise/level", [OscType::Float(l)]) => Event::Level(*l),
+        ("/nooise/chord", [OscType::Int(c), OscType::Float(a), OscType::Float(r)]) => {
+            Event::Chord {
+                index: *c,
+                attack: *a,
+                release: *r,
+            }
+        }
+        ("/nooise/voice/kick", [OscType::Float(l)]) => Event::Kick(*l),
         _ => Event::Unknown(addr.to_string()),
     }
 }
@@ -77,8 +93,16 @@ mod tests {
                     args: vec![OscType::Float(3.25)],
                 }),
                 OscPacket::Message(OscMessage {
+                    addr: "/nooise/level".into(),
+                    args: vec![OscType::Float(0.2)],
+                }),
+                OscPacket::Message(OscMessage {
+                    addr: "/nooise/chord".into(),
+                    args: vec![OscType::Int(2), OscType::Float(6.0), OscType::Float(8.0)],
+                }),
+                OscPacket::Message(OscMessage {
                     addr: "/nooise/voice/kick".into(),
-                    args: vec![],
+                    args: vec![OscType::Float(0.8)],
                 }),
                 OscPacket::Message(OscMessage {
                     addr: "/other".into(),
@@ -92,7 +116,13 @@ mod tests {
             events_in(packet),
             [
                 Event::Beat(3.25),
-                Event::Kick,
+                Event::Level(0.2),
+                Event::Chord {
+                    index: 2,
+                    attack: 6.0,
+                    release: 8.0
+                },
+                Event::Kick(0.8),
                 Event::Unknown("/other".into())
             ]
         );
