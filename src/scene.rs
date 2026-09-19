@@ -442,7 +442,7 @@ impl Default for System {
             .enumerate()
             .map(|(i, (voice, moon))| Planet {
                 voice,
-                orbit: 0.14 + i as f32 * 0.055,
+                orbit: 0.12 + i as f32 * 0.065,
                 tilt: 0.55 + (i % 3) as f32 * 0.08,
                 angle: i as f32 * 2.1,
                 moon,
@@ -515,7 +515,7 @@ impl Scene for System {
             area,
             cx,
             cy,
-            1.2 + 2.2 * pad.max(self.pulse.drive * 0.5),
+            2.0 + 2.5 * pad.max(self.pulse.drive * 0.5),
             0.55 + 0.45 * pad,
             hue + 20.0,
         );
@@ -539,14 +539,14 @@ impl Scene for System {
                 area,
                 x,
                 y,
-                0.4 + 1.6 * drive,
-                0.25 + 0.75 * drive,
+                0.9 + 2.0 * drive,
+                0.35 + 0.65 * drive,
                 phue,
             );
             if p.moon && drive > 0.05 {
                 let ma = p.angle * 5.0;
-                let mx = x + ma.cos() * (2.0 + 3.0 * drive) * 2.0;
-                let my = y + ma.sin() * (2.0 + 3.0 * drive) * 0.6;
+                let mx = x + ma.cos() * (3.0 + 3.0 * drive) * 2.0;
+                let my = y + ma.sin() * (3.0 + 3.0 * drive) * 0.6;
                 if mx >= 0.0 && my >= 0.0 {
                     paint(
                         buf,
