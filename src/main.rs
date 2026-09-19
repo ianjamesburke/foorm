@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use clap::Parser;
 
 mod app;
+mod gesture;
 mod osc;
 mod scene;
 

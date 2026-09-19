@@ -39,7 +39,7 @@ pub fn all() -> Vec<Box<dyn Scene>> {
     ]
 }
 
-const GRADIENT: &[char] = &[' ', '·', '∙', '•', '●', '◉', '⬤'];
+pub(crate) const GRADIENT: &[char] = &[' ', '·', '∙', '•', '●', '◉', '⬤'];
 const HUES: [f32; 5] = [205.0, 270.0, 325.0, 158.0, 38.0];
 
 /// RMS at which a voice counts as fully driven. Calibrated from nooise's
@@ -202,7 +202,7 @@ impl Pulse {
             Event::Beat(b) => self.beat = *b,
             Event::Level(l) => self.level = *l,
             Event::VoiceLevel(voice, l) => self.voice_levels[*voice as usize] = *l,
-            Event::Unknown(_) => {}
+            Event::Unknown(_) | Event::Gesture(..) => {}
         }
     }
 
@@ -1612,7 +1612,7 @@ impl Scene for Atlas {
     }
 }
 
-fn hsv(h: f32, s: f32, v: f32) -> Color {
+pub(crate) fn hsv(h: f32, s: f32, v: f32) -> Color {
     let h = h.rem_euclid(360.0);
     let c = v * s;
     let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
