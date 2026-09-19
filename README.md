@@ -36,13 +36,16 @@ Switch with `1`-`9` and `0` (atlas), `n`/`p`, or the arrow keys.
 `Tab` or `s` opens the settings overlay (listen address, scene, beat,
 per-voice levels, message counts, last message). `q` or `Ctrl+C` quits.
 
-Gestures: hold nooise's `z` Bloom, `x` Lift, `c` Submerge, `v` Echo, or
-`b` Thin and the picture follows the sound: Bloom glows outward, Lift
-brightens and sweeps the floor away, Submerge darkens and sinks to blue,
-Echo leaves trails, Thin drops cells to a lattice. Amounts come from nooise,
-so the picture rises and returns exactly with the audio. Holding a second
-gesture crossfades from the first instead of stacking. The settings overlay
-shows each gesture's amount.
+Gestures: hold `z` Bloom, `x` Lift, `c` Submerge, `v` Echo, or `b` Thin,
+the same keys as nooise. Bloom glows outward, Lift brightens and sweeps the
+floor away, Submerge darkens and sinks to blue, Echo leaves trails, Thin
+drops cells to a lattice. A held key rises at nooise's speed and returns in
+50 ms on release; in a terminal that reports no key releases a press toggles
+the hold instead, and the settings overlay says so. Gestures held in nooise
+arrive over OSC too and the larger of the two amounts wins, so one hand on
+either keyboard drives the picture. Holding a second gesture crossfades from
+the first instead of stacking. The settings overlay shows each gesture's
+amount and marks a local hold with `*`.
 
 Tuning: `t` opens the tune panel, one row per voice plus master, showing the
 full-drive level being edited, the level nooise reports right now, and the

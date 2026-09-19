@@ -3,11 +3,13 @@
 //! same way: Bloom glows, Lift brightens and sweeps the floor away, Submerge
 //! darkens and sinks the palette, Echo trails, Thin drops cells to a lattice.
 //!
-//! Amounts arrive already enveloped by nooise's audio clock, so a gesture's
-//! picture rises and returns exactly with its sound. Two gestures held at once
-//! crossfade by their relative amounts rather than stacking: pressing a
-//! second key while the first is held slides the frame from one look into
-//! the other.
+//! A gesture has two sources and takes the larger: foorm's own keys (the same
+//! `z x c v b` as nooise, with nooise's rise and return times so the two feel
+//! alike) and nooise's mirrored amounts, already enveloped by its audio clock
+//! so a gesture played there rises and returns exactly with its sound. Two
+//! gestures held at once crossfade by their relative amounts rather than
+//! stacking: pressing a second key while the first is held slides the frame
+//! from one look into the other.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -19,9 +21,30 @@ use crate::scene::{GRADIENT, hsv};
 /// Per-cell hue, saturation, value as painted.
 type Hsv = (f32, f32, f32);
 
+/// Seconds for a locally held gesture to reach full, as in nooise.
+fn rise_seconds(gesture: Gesture) -> f32 {
+    match gesture {
+        Gesture::Bloom => 1.5,
+        Gesture::Submerge => 1.2,
+        Gesture::Echo => 0.7,
+        Gesture::Thin => 1.0,
+        Gesture::Lift => 0.55,
+    }
+}
+
+/// Seconds for a released gesture to return, as in nooise.
+const RETURN_SECONDS: f32 = 0.05;
+
+#[derive(Clone, Copy, Default)]
+struct Local {
+    amount: f32,
+    held: bool,
+}
+
 #[derive(Default)]
 pub struct Gestures {
-    amount: [f32; Gesture::ALL.len()],
+    local: [Local; Gesture::ALL.len()],
+    osc: [f32; Gesture::ALL.len()],
     /// Last graded frame, for Echo trails; sized to the last area.
     echo: Vec<Hsv>,
     echo_size: (u16, u16),
@@ -30,23 +53,61 @@ pub struct Gestures {
 impl Gestures {
     pub fn on_event(&mut self, event: &Event) {
         if let Event::Gesture(gesture, amount) = event {
-            self.amount[*gesture as usize] = amount.clamp(0.0, 1.0);
+            self.osc[*gesture as usize] = amount.clamp(0.0, 1.0);
         }
     }
 
+    pub fn press(&mut self, gesture: Gesture) {
+        self.local[gesture as usize].held = true;
+    }
+
+    pub fn release(&mut self, gesture: Gesture) {
+        self.local[gesture as usize].held = false;
+    }
+
+    /// For terminals that report no key releases: one press holds, the next
+    /// releases.
+    pub fn toggle(&mut self, gesture: Gesture) {
+        let local = &mut self.local[gesture as usize];
+        local.held = !local.held;
+    }
+
+    pub fn held(&self, gesture: Gesture) -> bool {
+        self.local[gesture as usize].held
+    }
+
+    /// Advance the local envelopes by `dt` seconds.
+    pub fn tick(&mut self, dt: f32) {
+        for (gesture, local) in Gesture::ALL.into_iter().zip(&mut self.local) {
+            local.amount = if local.held {
+                (local.amount + dt / rise_seconds(gesture)).min(1.0)
+            } else {
+                (local.amount - dt / RETURN_SECONDS).max(0.0)
+            };
+        }
+    }
+
+    /// The larger of the local hold and nooise's mirrored amount.
     pub fn amount(&self, gesture: Gesture) -> f32 {
-        self.amount[gesture as usize]
+        self.local[gesture as usize]
+            .amount
+            .max(self.osc[gesture as usize])
+    }
+
+    fn amounts(&self) -> [f32; Gesture::ALL.len()] {
+        Gesture::ALL.map(|g| self.amount(g))
     }
 
     /// Weight of each gesture in the grade: alone, its amount; together,
     /// their amounts share one whole, so a rising second gesture fades the
     /// first out as it fades in.
     pub fn weights(&self) -> [f32; Gesture::ALL.len()] {
-        let total: f32 = self.amount.iter().sum();
+        let amounts = self.amounts();
+        let total: f32 = amounts.iter().sum();
         if total <= 1.0 {
-            self.amount
+            amounts
         } else {
-            self.amount.map(|a| a / total)
+            amounts.map(|a| a / total)
         }
     }
 
@@ -181,6 +242,34 @@ mod tests {
             cell.set_style(Style::default().fg(hsv(200.0, 0.7, 0.8)));
         }
         buf
+    }
+
+    #[test]
+    fn local_hold_rises_at_nooise_speed_returns_fast_and_joins_osc_by_max() {
+        let mut g = Gestures::default();
+        g.press(Gesture::Lift);
+        g.tick(0.275);
+        assert!((g.amount(Gesture::Lift) - 0.5).abs() < 1e-3);
+        g.tick(1.0);
+        assert_eq!(g.amount(Gesture::Lift), 1.0);
+        g.release(Gesture::Lift);
+        g.tick(0.05);
+        assert_eq!(g.amount(Gesture::Lift), 0.0);
+
+        g.on_event(&Event::Gesture(Gesture::Lift, 0.3));
+        g.press(Gesture::Lift);
+        g.tick(0.055);
+        assert!(
+            (g.amount(Gesture::Lift) - 0.3).abs() < 1e-3,
+            "osc wins while local is lower"
+        );
+        g.tick(0.5);
+        assert!(g.amount(Gesture::Lift) > 0.9, "local wins once higher");
+
+        g.toggle(Gesture::Echo);
+        assert!(g.held(Gesture::Echo));
+        g.toggle(Gesture::Echo);
+        assert!(!g.held(Gesture::Echo));
     }
 
     #[test]
