@@ -20,7 +20,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::osc::{Event, Voice};
+use crate::gesture::Gestures;
+use crate::osc::{Event, Gesture, Voice};
 use crate::scene::{self, Scene, Sensitivity};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -33,6 +34,7 @@ struct App {
     tune_open: bool,
     tune_row: usize,
     sensitivity: Sensitivity,
+    gestures: Gestures,
     received: u64,
     kicks: u64,
     unknown: u64,
@@ -51,11 +53,12 @@ impl App {
             Event::Level(l) => self.level = *l,
             Event::VoiceLevel(voice, l) => self.voice_levels[*voice as usize] = *l,
             Event::Unknown(_) => self.unknown += 1,
-            Event::Chord { .. } => {}
+            Event::Chord { .. } | Event::Gesture(..) => {}
         }
         for scene in &mut self.scenes {
             scene.on_event(&event);
         }
+        self.gestures.on_event(&event);
         self.last_event = Some(event);
     }
 
@@ -123,9 +126,10 @@ impl App {
         }
     }
 
-    fn draw(&self, f: &mut Frame) {
+    fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
         self.scenes[self.current].render(area, f.buffer_mut());
+        self.gestures.apply(area, f.buffer_mut());
         if self.settings_open {
             self.draw_settings(f, area);
         }
@@ -193,7 +197,7 @@ impl App {
 
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
         let width = 72.min(area.width);
-        let height = 11.min(area.height);
+        let height = 12.min(area.height);
         let panel = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
@@ -221,6 +225,13 @@ impl App {
                 Voice::ALL
                     .iter()
                     .map(|v| format!("{} {:.3}", v.name(), self.voice_levels[*v as usize]))
+                    .collect::<Vec<_>>()
+                    .join("  "),
+            ),
+            Line::from(
+                Gesture::ALL
+                    .iter()
+                    .map(|g| format!("{} {} {:.2}", g.key(), g.name(), self.gestures.amount(*g)))
                     .collect::<Vec<_>>()
                     .join("  "),
             ),
@@ -277,6 +288,7 @@ fn event_loop(
         tune_open: false,
         tune_row: 0,
         sensitivity: Sensitivity::default(),
+        gestures: Gestures::default(),
         received: 0,
         kicks: 0,
         unknown: 0,
@@ -330,6 +342,7 @@ mod tests {
             tune_open: false,
             tune_row: 0,
             sensitivity: Sensitivity::default(),
+            gestures: Gestures::default(),
             received: 0,
             kicks: 0,
             unknown: 0,

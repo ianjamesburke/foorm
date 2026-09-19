@@ -40,6 +40,14 @@ Use `n`/`p` or arrows to reach veil, ion and echo after atlas.
 `Tab` or `s` opens the settings overlay (listen address, scene, beat,
 per-voice levels, message counts, last message). `q` or `Ctrl+C` quits.
 
+Gestures: hold nooise's `z` Bloom, `x` Lift, `c` Submerge, `v` Echo, or
+`b` Thin and the picture follows the sound: Bloom glows outward, Lift
+brightens and sweeps the floor away, Submerge darkens and sinks to blue,
+Echo leaves trails, Thin drops cells to a lattice. Amounts come from nooise,
+so the picture rises and returns exactly with the audio. Holding a second
+gesture crossfades from the first instead of stacking. The settings overlay
+shows each gesture's amount.
+
 Tuning: `t` opens the tune panel, one row per voice plus master, showing the
 full-drive level being edited, the level nooise reports right now, and the
 drive that pair yields. `↑`/`↓` pick a row, `←`/`→` scale it by 1.25, `r`

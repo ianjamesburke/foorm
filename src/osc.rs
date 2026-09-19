@@ -52,6 +52,50 @@ impl Voice {
     }
 }
 
+/// nooise's live gestures, in its own order; the key is nooise's binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gesture {
+    Bloom,
+    Submerge,
+    Echo,
+    Thin,
+    Lift,
+}
+
+impl Gesture {
+    pub const ALL: [Gesture; 5] = [
+        Gesture::Bloom,
+        Gesture::Submerge,
+        Gesture::Echo,
+        Gesture::Thin,
+        Gesture::Lift,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Gesture::Bloom => "bloom",
+            Gesture::Submerge => "submerge",
+            Gesture::Echo => "echo",
+            Gesture::Thin => "thin",
+            Gesture::Lift => "lift",
+        }
+    }
+
+    pub fn key(self) -> char {
+        match self {
+            Gesture::Bloom => 'z',
+            Gesture::Submerge => 'c',
+            Gesture::Echo => 'v',
+            Gesture::Thin => 'b',
+            Gesture::Lift => 'x',
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Gesture> {
+        Gesture::ALL.into_iter().find(|g| g.name() == name)
+    }
+}
+
 /// One decoded message from a producer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -69,6 +113,8 @@ pub enum Event {
     },
     /// One kick hit at this `kick.level` (0 = inaudible).
     Kick(f32),
+    /// A live gesture's amount, 0..1, enveloped by nooise's audio clock.
+    Gesture(Gesture, f32),
     /// Any address foorm does not map to a shape yet.
     Unknown(String),
 }
@@ -119,14 +165,20 @@ fn event_for(addr: &str, args: &[OscType]) -> Event {
             }
         }
         ("/nooise/voice/kick", [OscType::Float(l)]) => Event::Kick(*l),
-        (_, [OscType::Float(l)]) => match addr
-            .strip_prefix("/nooise/voice/")
-            .and_then(|rest| rest.strip_suffix("/level"))
-            .and_then(Voice::from_name)
-        {
-            Some(voice) => Event::VoiceLevel(voice, *l),
-            None => Event::Unknown(addr.to_string()),
-        },
+        (_, [OscType::Float(l)]) => {
+            let voice = addr
+                .strip_prefix("/nooise/voice/")
+                .and_then(|rest| rest.strip_suffix("/level"))
+                .and_then(Voice::from_name);
+            let gesture = addr
+                .strip_prefix("/nooise/gesture/")
+                .and_then(Gesture::from_name);
+            match (voice, gesture) {
+                (Some(voice), _) => Event::VoiceLevel(voice, *l),
+                (_, Some(gesture)) => Event::Gesture(gesture, *l),
+                _ => Event::Unknown(addr.to_string()),
+            }
+        }
         _ => Event::Unknown(addr.to_string()),
     }
 }
@@ -162,6 +214,10 @@ mod tests {
                     args: vec![OscType::Float(0.15)],
                 }),
                 OscPacket::Message(OscMessage {
+                    addr: "/nooise/gesture/lift".into(),
+                    args: vec![OscType::Float(0.4)],
+                }),
+                OscPacket::Message(OscMessage {
                     addr: "/other".into(),
                     args: vec![],
                 }),
@@ -181,6 +237,7 @@ mod tests {
                 },
                 Event::Kick(0.8),
                 Event::VoiceLevel(Voice::Bass, 0.15),
+                Event::Gesture(Gesture::Lift, 0.4),
                 Event::Unknown("/other".into())
             ]
         );

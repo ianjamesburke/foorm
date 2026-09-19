@@ -18,6 +18,11 @@ The OSC address vocabulary is the only contract between them.
   half-block, Bayer-dithered and retained-trail rendering). Scenes own animation
   state only; no I/O. Every scene receives every event even while hidden, so
   switching never shows a cold scene.
+- `src/gesture.rs` — `Gestures`: nooise's live gestures (`/nooise/gesture/<name>`)
+  as a grade over the finished frame, one look per gesture (Bloom glow, Lift
+  brighten and sweep the floor, Submerge darken and sink to blue, Echo
+  trails, Thin lattice). Amounts are nooise's, already enveloped. Two held
+  gestures crossfade by relative amount; they never stack.
 - `src/app.rs` — terminal loop, frame pacing, settings overlay, tune panel
   (`t`; owns the live `Sensitivity`, pushes edits via `Scene::tune`, prints
   the table on quit when changed), keys.
@@ -42,6 +47,8 @@ The OSC address vocabulary is the only contract between them.
   hard-code an RMS. The tune panel edits it live; a tuned table is pasted
   back into `Sensitivity::default`, never persisted elsewhere. This table is
   where per-scene user settings will attach.
+- Gestures are a grade, not a scene: scenes never read gesture amounts, so a
+  held key looks the same on every scene and a new scene inherits it for free.
 - Heavy rendering belongs here, never in nooise: foorm exists so the producer
   stays light.
 
