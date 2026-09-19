@@ -98,7 +98,8 @@ impl App {
                 self.current = (self.current + self.scenes.len() - 1) % self.scenes.len();
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
-                let n = c.to_digit(10).unwrap_or(0) as usize;
+                let digit = c.to_digit(10).unwrap_or(0) as usize;
+                let n = if digit == 0 { 10 } else { digit };
                 if (1..=self.scenes.len()).contains(&n) {
                     self.current = n - 1;
                 }
@@ -207,10 +208,9 @@ impl App {
         let lines = vec![
             Line::from(format!("listen   {}", self.listen)),
             Line::from(format!(
-                "scene    {} ({}/{}, n/p or 1-{} to switch)",
+                "scene    {} ({}/{}, n/p or 1-9/0 to switch)",
                 self.scenes[self.current].name(),
                 self.current + 1,
-                self.scenes.len(),
                 self.scenes.len()
             )),
             Line::from(format!(
@@ -310,5 +310,39 @@ fn event_loop(
                 return Ok(app.sensitivity);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn digits_and_navigation_reach_all_ten_scenes() {
+        let mut app = App {
+            listen: "127.0.0.1:9000".parse().unwrap(),
+            scenes: scene::all(),
+            current: 0,
+            settings_open: false,
+            tune_open: false,
+            tune_row: 0,
+            sensitivity: Sensitivity::default(),
+            received: 0,
+            kicks: 0,
+            unknown: 0,
+            last_event: None,
+            beat: 0.0,
+            level: 0.0,
+            voice_levels: [0.0; Voice::ALL.len()],
+        };
+        for (i, c) in "1234567890".chars().enumerate() {
+            assert!(app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
+            assert_eq!(app.current, i);
+        }
+        assert_eq!(app.scenes[app.current].name(), "atlas");
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.current, 0);
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.current, 9);
     }
 }

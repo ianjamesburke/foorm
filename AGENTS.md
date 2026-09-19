@@ -13,9 +13,10 @@ The OSC address vocabulary is the only contract between them.
   producer addresses are mapped here and nowhere else.
 - `src/scene.rs` — `Scene` trait, `all()` (the switchable scene list, in key
   order), the shared `Pulse` bookkeeping (kick hits with level, chord layers
-  with attack/release envelopes, master level followed as `drive`), and the
-  scenes. Scenes own animation state only; no I/O. Every scene receives every
-  event even while hidden, so switching never shows a cold scene.
+  with attack/release envelopes, per-voice and master drives), shared layer
+  clocks and drawing helpers, and the ten scenes. Scenes own animation state
+  only; no I/O. Every scene receives every event even while hidden, so
+  switching never shows a cold scene.
 - `src/app.rs` — terminal loop, frame pacing, settings overlay, tune panel
   (`t`; owns the live `Sensitivity`, pushes edits via `Scene::tune`, prints
   the table on quit when changed), keys.

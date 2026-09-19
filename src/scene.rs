@@ -31,6 +31,11 @@ pub fn all() -> Vec<Box<dyn Scene>> {
         Box::new(Binary::default()),
         Box::new(Tide::default()),
         Box::new(Rain::default()),
+        Box::new(Estuary::default()),
+        Box::new(Loom::default()),
+        Box::new(Reef::default()),
+        Box::new(City::default()),
+        Box::new(Atlas::default()),
     ]
 }
 
@@ -849,6 +854,764 @@ impl Scene for Rain {
     }
 }
 
+// ------------------------------------------------------------ Layer drawing
+
+/// Independent clocks keep a solo voice from moving another voice's shapes.
+#[derive(Default)]
+struct Layers {
+    pulse: Pulse,
+    phases: [f32; Voice::ALL.len()],
+    ambient: f32,
+}
+
+impl Layers {
+    fn tick(&mut self, dt: f32) {
+        self.pulse.tick(dt);
+        for voice in Voice::ALL {
+            self.phases[voice as usize] += dt * self.pulse.voice(voice);
+        }
+        self.ambient += dt * self.pulse.drive;
+    }
+
+    fn phase(&self, voice: Voice) -> f32 {
+        self.phases[voice as usize]
+    }
+
+    fn background(&self, area: Rect, buf: &mut Buffer) {
+        starfield(buf, area, self.pulse.hue(), self.pulse.drive, self.ambient);
+    }
+
+    /// All five scenes share the same hit trajectory, independent of the mix.
+    /// The sustained kick meter is a separate, stationary foot at the anchor.
+    fn kick(&self, area: Rect, buf: &mut Buffer) {
+        let w = area.width.max(1) as f32;
+        let h = area.height.max(1) as f32;
+        let hue = self.pulse.hue();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let v = kick_ring(&self.pulse.live, x as f32 / w, y as f32 / h, w, h);
+                Ink::new(v, 0.0, '~').draw(buf, area, x, y, hue);
+            }
+        }
+        let drive = self.pulse.voice(Voice::Kick);
+        if drive > 0.0 {
+            disc(
+                buf,
+                area,
+                w * 0.5,
+                h - 1.0,
+                (h * 0.16 + 1.0) * drive,
+                drive,
+                hue,
+            );
+        }
+        for hit in &self.pulse.live {
+            let v = hit.level * Pulse::fade(hit.age);
+            if v > 0.0 {
+                disc(
+                    buf,
+                    area,
+                    w * 0.5 + hit.wobble.0,
+                    h - 1.0 + hit.wobble.1,
+                    (1.0 + h * 0.12 * Pulse::fade(hit.age)) * hit.level,
+                    v,
+                    hue,
+                );
+            }
+        }
+    }
+}
+
+/// Brightest layer wins at crossings; a silent layer cannot erase another.
+#[derive(Default)]
+struct Ink {
+    value: f32,
+    offset: f32,
+    glyph: Option<char>,
+}
+
+impl Ink {
+    fn new(value: f32, offset: f32, glyph: char) -> Self {
+        Self {
+            value,
+            offset,
+            glyph: Some(glyph),
+        }
+    }
+
+    fn layer(&mut self, value: f32, offset: f32, glyph: char) {
+        if value > self.value {
+            *self = Self::new(value, offset, glyph);
+        }
+    }
+
+    fn draw(&self, buf: &mut Buffer, area: Rect, x: u16, y: u16, hue: f32) {
+        // Match paint's first visible glyph, a raster limit, not an RMS gate.
+        if (self.value.clamp(0.0, 1.0) * (GRADIENT.len() - 1) as f32).round() == 0.0 {
+            return;
+        }
+        paint(buf, area, x, y, self.value, hue + self.offset);
+        if x < area.width
+            && y < area.height
+            && let Some(glyph) = self.glyph
+        {
+            buf[(area.x + x, area.y + y)].set_char(glyph);
+        }
+    }
+}
+
+/// Soft coverage for a stroke of a given half-width in the caller's units.
+fn ridge(distance: f32, width: f32) -> f32 {
+    (1.0 - distance.abs() / width.max(f32::EPSILON)).max(0.0)
+}
+
+fn field(area: Rect, buf: &mut Buffer, hue: f32, sample: impl Fn(f32, f32) -> Ink) {
+    for y in 0..area.height {
+        for x in 0..area.width {
+            sample(x as f32, y as f32).draw(buf, area, x, y, hue);
+        }
+    }
+}
+
+// ------------------------------------------------------------ Estuary
+
+/// Aurora, dunes, weather, moon, birds and a comet occupy separate depths.
+#[derive(Default)]
+pub struct Estuary {
+    layers: Layers,
+}
+
+impl Scene for Estuary {
+    fn name(&self) -> &'static str {
+        "estuary"
+    }
+    fn on_event(&mut self, event: &Event) {
+        self.layers.pulse.on_event(event);
+    }
+    fn tune(&mut self, sensitivity: Sensitivity) {
+        self.layers.pulse.sensitivity = sensitivity;
+    }
+    fn tick(&mut self, dt: f32) {
+        self.layers.tick(dt);
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let l = &self.layers;
+        let p = &l.pulse;
+        let w = area.width.max(1) as f32;
+        let h = area.height.max(1) as f32;
+        l.background(area, buf);
+        field(area, buf, p.hue(), |x, y| {
+            let (nx, ny) = (x / w, y / h);
+            let mut ink = Ink::default();
+            let pad = p.voice(Voice::Pad);
+            let curtain = 0.16 + 0.07 * (nx * 9.0 + l.phase(Voice::Pad)).sin();
+            let folds = 0.65 + 0.35 * (nx * 45.0 - l.phase(Voice::Pad)).sin().abs();
+            ink.layer(
+                pad * ridge(ny - curtain, 0.08 + pad * 0.1) * folds,
+                -30.0,
+                '|',
+            );
+
+            let bass = p.voice(Voice::Bass);
+            for depth in 0..3 {
+                let d = depth as f32;
+                let ground = 0.78 + d * 0.075 - bass * 0.12
+                    + (nx * (7.0 + d * 3.0) + l.phase(Voice::Bass) * 0.7 + d).sin() * 0.045;
+                if ny >= ground {
+                    let contour = ((ny - ground) * h).rem_euclid(3.0);
+                    ink.layer(
+                        bass * (0.4 + d * 0.15),
+                        35.0 + d * 12.0,
+                        if contour < 1.0 { '=' } else { ':' },
+                    );
+                }
+            }
+
+            // Weather occupies opposite banks, so clap and perc remain distinct.
+            if nx > 0.57 && ny < 0.76 {
+                let streak = (nx * 22.0 + ny * 3.0).rem_euclid(1.0);
+                let fall = (ny * 6.0 - l.phase(Voice::Perc) * 3.0 + nx * 4.0).rem_euclid(1.0);
+                ink.layer(
+                    p.voice(Voice::Perc) * ridge(streak - 0.5, 0.16) * ridge(fall - 0.5, 0.4),
+                    -65.0,
+                    '/',
+                );
+            }
+            if (0.22..0.72).contains(&ny) {
+                let zig = ((ny * 18.0).floor() + l.phase(Voice::Clap) * 2.0).sin();
+                for branch in [0.13, 0.28] {
+                    ink.layer(
+                        p.voice(Voice::Clap)
+                            * ridge(
+                                nx - branch - zig * 0.035,
+                                0.018 + 0.016 * p.voice(Voice::Clap),
+                            ),
+                        100.0,
+                        '#',
+                    );
+                }
+            }
+
+            let tonal = p.voice(Voice::Tonal);
+            let radius = h.min(w / 2.0) * (0.055 + tonal * 0.065);
+            let dx = (x - w * 0.76) / 2.0;
+            let dy = y - h * 0.24;
+            let distance = dx.hypot(dy);
+            ink.layer(tonal * ridge(distance, radius), 65.0, 'O');
+            ink.layer(tonal * 0.6 * ridge(distance - radius, 1.1), 65.0, '+');
+
+            let arp = p.voice(Voice::Arp);
+            for bird in 0..4 {
+                let b = bird as f32;
+                let bx = (0.12 + b * 0.23 + l.phase(Voice::Arp) * 0.035).rem_euclid(1.0);
+                let dx = (nx - bx).abs();
+                if dx < 0.055 {
+                    let wing =
+                        0.48 + b.sin() * 0.055 - dx * (1.0 + l.phase(Voice::Arp).sin() * 0.4);
+                    ink.layer(
+                        arp * ridge(ny - wing, 0.028 + arp * 0.025),
+                        -100.0,
+                        if nx < bx { '\\' } else { '/' },
+                    );
+                }
+            }
+            let lead = p.voice(Voice::Lead);
+            let ribbon = 0.34 + 0.055 * (nx * 9.0 - l.phase(Voice::Lead) * 1.7).sin();
+            let segments = 0.55 + 0.45 * (nx * 17.0 - l.phase(Voice::Lead) * 3.0).cos().abs();
+            ink.layer(
+                lead * ridge(ny - ribbon, 0.025 + lead * 0.035) * segments,
+                140.0,
+                '>',
+            );
+            ink
+        });
+        l.kick(area, buf);
+    }
+}
+
+/// Labels are clipped to the scene rectangle, including offset rectangles.
+fn caption(buf: &mut Buffer, area: Rect, at: (u16, u16), text: &str, hue: f32) {
+    for (i, c) in text.chars().enumerate() {
+        let x = usize::from(at.0) + i;
+        if x >= usize::from(area.width) || at.1 >= area.height {
+            break;
+        }
+        buf[(area.x + x as u16, area.y + at.1)]
+            .set_char(c)
+            .set_style(Style::default().fg(hsv(hue, 0.5, 0.65)));
+    }
+}
+
+const INSTRUMENTS: [Voice; 7] = [
+    Voice::Pad,
+    Voice::Bass,
+    Voice::Perc,
+    Voice::Clap,
+    Voice::Tonal,
+    Voice::Arp,
+    Voice::Lead,
+];
+
+// ------------------------------------------------------------ Loom
+
+/// Seven labelled warp ribbons, each with its own weave and clock.
+#[derive(Default)]
+pub struct Loom {
+    layers: Layers,
+}
+
+impl Scene for Loom {
+    fn name(&self) -> &'static str {
+        "loom"
+    }
+    fn on_event(&mut self, event: &Event) {
+        self.layers.pulse.on_event(event);
+    }
+    fn tune(&mut self, sensitivity: Sensitivity) {
+        self.layers.pulse.sensitivity = sensitivity;
+    }
+    fn tick(&mut self, dt: f32) {
+        self.layers.tick(dt);
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let l = &self.layers;
+        let p = &l.pulse;
+        let w = area.width.max(1) as f32;
+        let h = area.height.max(1) as f32;
+        let lane = w / INSTRUMENTS.len() as f32;
+        l.background(area, buf);
+        field(area, buf, p.hue(), |x, y| {
+            let mut ink = Ink::default();
+            if y < 3.0 || y >= h - 2.0 {
+                return ink;
+            }
+            let i = ((x / lane) as usize).min(INSTRUMENTS.len() - 1);
+            let voice = INSTRUMENTS[i];
+            let d = p.voice(voice);
+            let t = l.phase(voice);
+            let u = (x / lane).fract() * 2.0 - 1.0;
+            let v = y / h;
+            let a = v * TAU * 2.0 - t * 1.4;
+            let offset = i as f32 * 32.0 - 90.0;
+            let (coverage, glyph) = match voice {
+                Voice::Pad => (
+                    ridge(u - a.sin() * 0.25, 0.4 + d * 0.4)
+                        * (0.65 + 0.35 * (u * 10.0 + t).cos().abs()),
+                    '|',
+                ),
+                Voice::Bass => (
+                    ridge(u, 0.3 + d * 0.6) * (0.5 + 0.5 * (v * 30.0 - t).sin().abs()),
+                    '=',
+                ),
+                Voice::Perc => {
+                    let bead = (v * 6.0 - t).rem_euclid(1.0) * 2.0 - 1.0;
+                    ((1.0 - (u.abs() + bead.abs()) / (0.5 + d)).max(0.0), 'o')
+                }
+                Voice::Clap => {
+                    let bar = (v * 5.0 - t * 1.7).rem_euclid(1.0);
+                    (ridge(bar - 0.5, 0.2 + d * 0.2) * ridge(u, 1.2), '#')
+                }
+                Voice::Tonal => (
+                    ridge(u - a.sin() * 0.55, 0.3 + d * 0.3)
+                        .max(ridge(u + a.sin() * 0.55, 0.16) * 0.55),
+                    '~',
+                ),
+                Voice::Arp => {
+                    let step = ((v * 9.0 - t * 2.0).floor()).rem_euclid(4.0) / 3.0;
+                    (ridge(u - (step - 0.5), 0.3 + d * 0.25), '+')
+                }
+                Voice::Lead => (
+                    ridge(u - a.cos() * 0.5, 0.22 + d * 0.3)
+                        .max(ridge(u + a.cos() * 0.5, 0.22 + d * 0.3)),
+                    '/',
+                ),
+                Voice::Kick => (0.0, ' '),
+            };
+            ink.layer(d * coverage, offset, glyph);
+            ink
+        });
+        for (i, voice) in INSTRUMENTS.iter().enumerate() {
+            let x = (lane * (i as f32 + 0.5) - voice.name().len() as f32 / 2.0).max(0.0) as u16;
+            caption(
+                buf,
+                area,
+                (x, 1),
+                voice.name(),
+                p.hue() + i as f32 * 32.0 - 90.0,
+            );
+        }
+        l.kick(area, buf);
+    }
+}
+
+// ------------------------------------------------------------ Reef
+
+/// A living reef with large silhouettes at different depths.
+#[derive(Default)]
+pub struct Reef {
+    layers: Layers,
+}
+
+impl Scene for Reef {
+    fn name(&self) -> &'static str {
+        "reef"
+    }
+    fn on_event(&mut self, event: &Event) {
+        self.layers.pulse.on_event(event);
+    }
+    fn tune(&mut self, sensitivity: Sensitivity) {
+        self.layers.pulse.sensitivity = sensitivity;
+    }
+    fn tick(&mut self, dt: f32) {
+        self.layers.tick(dt);
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let l = &self.layers;
+        let p = &l.pulse;
+        let w = area.width.max(1) as f32;
+        let h = area.height.max(1) as f32;
+        let scale = h.min(w / 2.0);
+        l.background(area, buf);
+        field(area, buf, p.hue(), |x, y| {
+            let (nx, ny) = (x / w, y / h);
+            let mut ink = Ink::default();
+            let pad = p.voice(Voice::Pad);
+            for stalk in 0..3 {
+                let s = stalk as f32;
+                if ny > 0.22 + s * 0.09 && ny < 0.94 {
+                    let stem = 0.055
+                        + s * 0.085
+                        + (ny * 9.0 + l.phase(Voice::Pad) + s).sin() * 0.035 * (1.0 - ny);
+                    let leaves = (ny * 22.0 + s * 2.0).sin().powi(2);
+                    ink.layer(pad * ridge(nx - stem, 0.012 + leaves * 0.042), -55.0, '|');
+                }
+            }
+            let bass = p.voice(Voice::Bass);
+            if ny > 0.71 {
+                for root in [0.32, 0.55, 0.78] {
+                    let growth = (0.96 - ny).max(0.0);
+                    for branch in [-1.0, 0.0, 1.0] {
+                        let stem = root
+                            + branch * growth * 0.42
+                            + (ny * 24.0 + l.phase(Voice::Bass)).sin() * 0.014;
+                        ink.layer(bass * ridge(nx - stem, 0.018 + bass * 0.014), 55.0, '#');
+                    }
+                }
+            }
+            let perc = p.voice(Voice::Perc);
+            for bubble in 0..5 {
+                let b = bubble as f32;
+                let cx = w * (0.83 + (b * 2.3).sin() * 0.09);
+                let cy = h * (0.92 - (b * 0.19 + l.phase(Voice::Perc) * 0.13).rem_euclid(0.85));
+                let distance = ((x - cx) / 2.0).hypot(y - cy);
+                let radius = scale * (0.025 + perc * 0.035);
+                ink.layer(perc * ridge(distance - radius, 0.8), -100.0, 'o');
+            }
+            let clap = p.voice(Voice::Clap);
+            let dx = (x - w * 0.77) / 2.0;
+            let dy = y - h * 0.73;
+            let distance = dx.hypot(dy);
+            let angle = dy.atan2(dx);
+            if dy < 0.0 {
+                let ribs = 0.4 + 0.6 * (angle * 9.0 + l.phase(Voice::Clap) * 2.0).cos().abs();
+                ink.layer(
+                    clap * ridge(distance, scale * (0.1 + clap * 0.16)) * ribs,
+                    110.0,
+                    '/',
+                );
+            }
+            let tonal = p.voice(Voice::Tonal);
+            let dx = (x - w * 0.41) / 2.0;
+            let dy = y - h * 0.69;
+            let angle = dy.atan2(dx);
+            let petal = 0.75 + 0.25 * (angle * 7.0 + l.phase(Voice::Tonal)).cos();
+            let radius = scale * (0.06 + tonal * 0.1) * petal;
+            ink.layer(tonal * ridge(dx.hypot(dy), radius), 10.0, '@');
+            ink.layer(tonal * 0.7 * ridge(dx.hypot(dy) - radius, 0.7), 10.0, '+');
+
+            let arp = p.voice(Voice::Arp);
+            for fish in 0..3 {
+                let f = fish as f32;
+                let cx = (0.31 + f * 0.18 + l.phase(Voice::Arp) * 0.045).rem_euclid(0.65) + 0.15;
+                let cy = 0.38 + f * 0.105;
+                let dx = (nx - cx) / (0.035 + arp * 0.055);
+                let dy = (ny - cy) / (0.025 + arp * 0.055);
+                ink.layer(
+                    arp * (1.0 - dx.abs() * 0.55 - dy.abs()).max(0.0),
+                    -145.0,
+                    '>',
+                );
+                if (-1.7..-0.7).contains(&dx) {
+                    ink.layer(arp * ridge(dy, (dx + 0.7).abs()), -145.0, '<');
+                }
+            }
+            let lead = p.voice(Voice::Lead);
+            let cx = 0.5 + l.phase(Voice::Lead).sin() * 0.07;
+            let dx = (nx - cx) / (0.12 + lead * 0.17);
+            let wing = 0.19 + dx.abs() * 0.06 * (l.phase(Voice::Lead) * 1.6).cos();
+            let body = ridge(ny - wing, (0.035 + lead * 0.09) * (1.0 - dx.abs()).max(0.0));
+            if dx.abs() < 1.0 {
+                ink.layer(lead * body, 155.0, '=');
+            }
+            if (0.19..0.38).contains(&ny) {
+                ink.layer(
+                    lead * ridge(
+                        nx - cx - (ny * 20.0 + l.phase(Voice::Lead)).sin() * 0.015,
+                        0.012,
+                    ),
+                    155.0,
+                    '~',
+                );
+            }
+            ink
+        });
+        l.kick(area, buf);
+    }
+}
+
+// ------------------------------------------------------------ City
+
+/// A night skyline: architecture, traffic and signals have separate owners.
+#[derive(Default)]
+pub struct City {
+    layers: Layers,
+}
+
+impl Scene for City {
+    fn name(&self) -> &'static str {
+        "city"
+    }
+    fn on_event(&mut self, event: &Event) {
+        self.layers.pulse.on_event(event);
+    }
+    fn tune(&mut self, sensitivity: Sensitivity) {
+        self.layers.pulse.sensitivity = sensitivity;
+    }
+    fn tick(&mut self, dt: f32) {
+        self.layers.tick(dt);
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let l = &self.layers;
+        let p = &l.pulse;
+        let w = area.width.max(1) as f32;
+        let h = area.height.max(1) as f32;
+        let scale = h.min(w / 2.0);
+        l.background(area, buf);
+        field(area, buf, p.hue(), |x, y| {
+            let (nx, ny) = (x / w, y / h);
+            let mut ink = Ink::default();
+            let pad = p.voice(Voice::Pad);
+            if ny < 0.73 {
+                for origin in [0.08, 0.92] {
+                    let reach = 0.73 - ny;
+                    let sweep = (l.phase(Voice::Pad) * 0.6 + origin * 5.0).sin() * 0.4;
+                    let beam = ridge(nx - origin - reach * sweep, reach * (0.09 + pad * 0.12));
+                    ink.layer(pad * beam * 0.7, -50.0, ':');
+                }
+            }
+            let bass = p.voice(Voice::Bass);
+            if (0.3..0.68).contains(&nx) && ny < 0.76 {
+                let block = ((nx - 0.3) * 24.0).floor();
+                let roof = 0.71 - bass * (0.23 + 0.21 * (block * 2.4).sin().abs())
+                    + (l.phase(Voice::Bass) + block).sin() * bass * 0.025;
+                if ny > roof {
+                    let edge = ((nx - 0.3) * 24.0).fract();
+                    ink.layer(
+                        bass * (0.6 + 0.3 * edge),
+                        45.0,
+                        if edge < 0.16 {
+                            '|'
+                        } else if (y as u16).is_multiple_of(3) {
+                            '='
+                        } else {
+                            '#'
+                        },
+                    );
+                }
+            }
+            let perc = p.voice(Voice::Perc);
+            for lane in 0..3 {
+                let lane = lane as f32;
+                let direction = if lane == 1.0 { -1.0 } else { 1.0 };
+                let car = (nx * 5.0 - l.phase(Voice::Perc) * direction * 1.8 + lane * 0.6)
+                    .rem_euclid(1.0);
+                let road = ridge(ny - (0.8 + lane * 0.065), 0.032);
+                ink.layer(perc * ridge(car - 0.5, 0.3) * road, -90.0, '=');
+                if car > 0.62 {
+                    ink.layer(perc * road, -90.0, '>');
+                }
+            }
+            let clap = p.voice(Voice::Clap);
+            for tower in [0.08, 0.92] {
+                let dx = (x - w * tower) / 2.0;
+                let dy = y - h * 0.4;
+                let r = scale * (0.04 + clap * 0.08);
+                let rays = (dy.atan2(dx) * 4.0 + l.phase(Voice::Clap) * 2.0)
+                    .cos()
+                    .abs();
+                ink.layer(
+                    clap * ridge(dx.hypot(dy) - r, 1.0) * (0.5 + rays * 0.5),
+                    115.0,
+                    '*',
+                );
+                if (0.4..0.74).contains(&ny) {
+                    ink.layer(clap * ridge(nx - tower, 0.017), 115.0, '!');
+                }
+            }
+            let tonal = p.voice(Voice::Tonal);
+            let dx = (x - w * 0.21) / 2.0;
+            let dy = y - h * 0.42;
+            let r = scale * (0.065 + tonal * 0.08);
+            let distance = dx.hypot(dy);
+            ink.layer(tonal * ridge(distance - r, 1.0), 0.0, 'O');
+            if distance < r {
+                let a = l.phase(Voice::Tonal) * 1.5;
+                let hand = ridge(dx * a.sin() - dy * a.cos(), 0.85);
+                ink.layer(tonal * hand, 0.0, '+');
+            }
+            if (0.48..0.75).contains(&ny) {
+                ink.layer(tonal * ridge(nx - 0.21, 0.06), 0.0, '|');
+            }
+            let arp = p.voice(Voice::Arp);
+            if (0.69..0.83).contains(&nx) && (0.28..0.75).contains(&ny) {
+                let col = ((nx - 0.69) * w / 3.0).floor();
+                let row = (ny * h / 2.0).floor();
+                let chase = 0.35 + 0.65 * (row - col - l.phase(Voice::Arp) * 4.0).cos().powi(2);
+                let window = if (x as u16).is_multiple_of(3) {
+                    '|'
+                } else {
+                    '+'
+                };
+                ink.layer(arp * chase, -140.0, window);
+            }
+            let lead = p.voice(Voice::Lead);
+            let cx = 0.5 + l.phase(Voice::Lead).sin() * 0.12;
+            let dx = (nx - cx) / (0.13 + lead * 0.08);
+            let dy = (ny - 0.16) / (0.045 + lead * 0.08);
+            ink.layer(lead * ridge(dx.hypot(dy), 1.0), 155.0, '@');
+            if nx < cx && nx > cx - 0.3 {
+                let tail = 0.16 + (nx * 30.0 - l.phase(Voice::Lead) * 3.0).sin() * 0.035;
+                ink.layer(lead * ridge(ny - tail, 0.03), 155.0, '~');
+            }
+            ink
+        });
+        l.kick(area, buf);
+    }
+}
+
+// ------------------------------------------------------------ Atlas
+
+/// Seven named constellations. A bridge lights only while both ends play.
+#[derive(Default)]
+pub struct Atlas {
+    layers: Layers,
+}
+
+const CLUSTERS: [(Voice, f32, f32); 7] = [
+    (Voice::Pad, 0.5, 0.16),
+    (Voice::Bass, 0.5, 0.75),
+    (Voice::Perc, 0.12, 0.58),
+    (Voice::Clap, 0.88, 0.58),
+    (Voice::Tonal, 0.16, 0.22),
+    (Voice::Arp, 0.84, 0.22),
+    (Voice::Lead, 0.5, 0.45),
+];
+
+/// Distance to a segment and progress along it, in aspect-corrected units.
+fn segment(at: (f32, f32), from: (f32, f32), to: (f32, f32)) -> (f32, f32) {
+    let dx = to.0 - from.0;
+    let dy = to.1 - from.1;
+    let length_squared = dx * dx + dy * dy;
+    let t = (((at.0 - from.0) * dx + (at.1 - from.1) * dy) / length_squared.max(f32::EPSILON))
+        .clamp(0.0, 1.0);
+    ((at.0 - from.0 - t * dx).hypot(at.1 - from.1 - t * dy), t)
+}
+
+impl Scene for Atlas {
+    fn name(&self) -> &'static str {
+        "atlas"
+    }
+    fn on_event(&mut self, event: &Event) {
+        self.layers.pulse.on_event(event);
+    }
+    fn tune(&mut self, sensitivity: Sensitivity) {
+        self.layers.pulse.sensitivity = sensitivity;
+    }
+    fn tick(&mut self, dt: f32) {
+        self.layers.tick(dt);
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let l = &self.layers;
+        let p = &l.pulse;
+        let w = area.width.max(1) as f32;
+        let h = area.height.max(1) as f32;
+        let scale = h.min(w / 2.0);
+        l.background(area, buf);
+        field(area, buf, p.hue(), |x, y| {
+            let mut ink = Ink::default();
+            for (a, b) in [
+                (0, 4),
+                (0, 5),
+                (0, 6),
+                (1, 2),
+                (1, 3),
+                (1, 6),
+                (2, 4),
+                (3, 5),
+                (2, 6),
+                (3, 6),
+            ] {
+                let (va, ax, ay) = CLUSTERS[a];
+                let (vb, bx, by) = CLUSTERS[b];
+                let together = p.voice(va).min(p.voice(vb));
+                let (distance, along) =
+                    segment((x / 2.0, y), (ax * w / 2.0, ay * h), (bx * w / 2.0, by * h));
+                let travel = 0.4 + 0.6 * (along * 18.0 - l.phase(va) - l.phase(vb)).cos().powi(2);
+                ink.layer(
+                    together * ridge(distance, 0.75) * travel * 0.65,
+                    (a + b) as f32 * 16.0 - 90.0,
+                    ':',
+                );
+            }
+            for (i, &(voice, cx, cy)) in CLUSTERS.iter().enumerate() {
+                let d = p.voice(voice);
+                let t = l.phase(voice);
+                let dx = (x - w * cx) / 2.0;
+                let dy = y - h * cy;
+                let distance = dx.hypot(dy);
+                let angle = dy.atan2(dx);
+                let radius = scale * (0.065 + d * 0.055);
+                let offset = i as f32 * 32.0 - 90.0;
+                let (shape, glyph) = match voice {
+                    Voice::Pad => {
+                        let shell = radius * (0.8 + 0.15 * (angle * 3.0 + t).sin());
+                        (
+                            ridge(distance - shell, 0.9).max(ridge(distance, radius) * 0.6),
+                            'O',
+                        )
+                    }
+                    Voice::Bass => (ridge(dx.abs() + dy.abs(), radius * 1.35), '#'),
+                    Voice::Perc => {
+                        let petals = 0.7 + 0.3 * (angle * 5.0 - t * 2.0).cos();
+                        (ridge(distance - radius * petals, 0.85), 'o')
+                    }
+                    Voice::Clap => {
+                        let spokes = (angle * 4.0 + t).cos().abs().powi(3);
+                        (ridge(distance, radius * 1.4) * spokes, '*')
+                    }
+                    Voice::Tonal => (
+                        ridge(dx.hypot(dy * 1.6) - radius, 0.8)
+                            .max(ridge((dx * 1.6).hypot(dy) - radius, 0.8)),
+                        '~',
+                    ),
+                    Voice::Arp => {
+                        let square = dx.abs().max(dy.abs());
+                        let chase = 0.55 + 0.45 * (angle * 3.0 - t * 3.0).cos().abs();
+                        (ridge(square - radius * 0.75, 0.85) * chase, '+')
+                    }
+                    Voice::Lead => {
+                        let spiral = (angle * 2.0 - distance / radius * 7.0 + t * 2.0)
+                            .sin()
+                            .abs();
+                        (ridge(distance, radius * 1.3) * (0.3 + 0.7 * spiral), '@')
+                    }
+                    Voice::Kick => (0.0, ' '),
+                };
+                ink.layer(d * shape, offset, glyph);
+                // Each cluster carries a broad, moving satellite on its own clock.
+                let orbit = radius * 1.35;
+                let sx = orbit * (t + i as f32).cos();
+                let sy = orbit * (t + i as f32).sin();
+                ink.layer(d * ridge((dx - sx).hypot(dy - sy), 0.8 + d), offset, '+');
+            }
+            ink
+        });
+        for (i, &(voice, cx, cy)) in CLUSTERS.iter().enumerate() {
+            let (x, y) = if matches!(voice, Voice::Pad | Voice::Bass | Voice::Lead) {
+                ((cx * w + scale * 0.48) as u16, (cy * h) as u16)
+            } else {
+                (
+                    (cx * w - voice.name().len() as f32 * 0.5).max(0.0) as u16,
+                    (cy * h - scale * 0.16 - 1.0).max(0.0) as u16,
+                )
+            };
+            caption(
+                buf,
+                area,
+                (x, y),
+                voice.name(),
+                p.hue() + i as f32 * 32.0 - 90.0,
+            );
+        }
+        l.kick(area, buf);
+    }
+}
+
 fn hsv(h: f32, s: f32, v: f32) -> Color {
     let h = h.rem_euclid(360.0);
     let c = v * s;
@@ -883,7 +1646,17 @@ mod tests {
 
     #[test]
     fn every_scene_renders_any_size_after_hits() {
-        for (w, h) in [(0, 0), (1, 1), (3, 2), (46, 10), (200, 60)] {
+        for (w, h) in [
+            (0, 0),
+            (0, 20),
+            (20, 0),
+            (1, 1),
+            (3, 2),
+            (46, 10),
+            (60, 20),
+            (120, 40),
+            (200, 60),
+        ] {
             for mut scene in all() {
                 for event in [
                     Event::Level(0.3),
@@ -896,10 +1669,172 @@ mod tests {
                 ] {
                     scene.on_event(&event);
                 }
+                for voice in Voice::ALL {
+                    scene.on_event(&Event::VoiceLevel(
+                        voice,
+                        Sensitivity::default().get(voice as usize),
+                    ));
+                }
                 scene.tick(0.3);
                 let area = Rect::new(0, 0, w, h);
                 let mut buf = Buffer::empty(area);
                 scene.render(area, &mut buf);
+            }
+        }
+    }
+
+    fn frame(scene: &dyn Scene, area: Rect) -> Buffer {
+        let mut buf = Buffer::empty(area);
+        scene.render(area, &mut buf);
+        buf
+    }
+
+    fn play(scene: &mut dyn Scene, voices: &[Voice]) {
+        let sensitivity = Sensitivity::default();
+        for &voice in voices {
+            scene.on_event(&Event::VoiceLevel(
+                voice,
+                sensitivity.get(voice as usize) * 0.4225,
+            ));
+        }
+        scene.tick(0.5);
+    }
+
+    #[test]
+    fn new_scenes_show_each_voice_alone_and_in_the_mix() {
+        for (w, h) in [(60, 20), (120, 40)] {
+            let area = Rect::new(3, 2, w, h);
+            for index in 5..all().len() {
+                for voice in Voice::ALL {
+                    let mut solo = all().remove(index);
+                    let silent = frame(solo.as_ref(), area);
+                    play(solo.as_mut(), &[voice]);
+                    let active = frame(solo.as_ref(), area);
+                    let changed_rows = (area.y..area.bottom())
+                        .filter(|&y| {
+                            (area.x..area.right())
+                                .any(|x| active[(x, y)].symbol() != silent[(x, y)].symbol())
+                        })
+                        .count();
+                    assert!(
+                        changed_rows >= 3,
+                        "{} {voice:?} too small at {w}x{h}: {changed_rows} rows",
+                        solo.name()
+                    );
+
+                    let mut mix = all().remove(index);
+                    play(mix.as_mut(), &Voice::ALL);
+                    let full = frame(mix.as_ref(), area);
+                    let mut muted = all().remove(index);
+                    let others: Vec<_> = Voice::ALL.into_iter().filter(|&v| v != voice).collect();
+                    play(muted.as_mut(), &others);
+                    let without = frame(muted.as_ref(), area);
+                    let changed = full
+                        .content
+                        .iter()
+                        .zip(&without.content)
+                        .filter(|(a, b)| a.symbol() != b.symbol())
+                        .count();
+                    assert!(
+                        changed >= 3,
+                        "{} {voice:?} hidden in mix at {w}x{h}: {changed} cells",
+                        mix.name()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn new_scenes_ignore_beat_and_settle_after_silence() {
+        let area = Rect::new(0, 0, 60, 20);
+        for mut scene in all().into_iter().skip(5) {
+            let initial = frame(scene.as_ref(), area);
+            scene.on_event(&Event::Beat(42.0));
+            scene.tick(1.0);
+            assert_eq!(
+                initial,
+                frame(scene.as_ref(), area),
+                "{} moves on beat",
+                scene.name()
+            );
+            play(scene.as_mut(), &Voice::ALL);
+            scene.on_event(&Event::Kick(0.7));
+            scene.on_event(&Event::Level(0.1));
+            scene.tick(0.2);
+            for voice in Voice::ALL {
+                scene.on_event(&Event::VoiceLevel(voice, 0.0));
+            }
+            scene.on_event(&Event::Level(0.0));
+            scene.tick(3.0);
+            let settled = frame(scene.as_ref(), area);
+            scene.tick(1.0);
+            assert_eq!(
+                settled,
+                frame(scene.as_ref(), area),
+                "{} moves in silence",
+                scene.name()
+            );
+        }
+    }
+
+    #[test]
+    fn new_scenes_apply_live_tuning_and_master_only_motion() {
+        let area = Rect::new(0, 0, 60, 20);
+        for index in 5..all().len() {
+            let mut tuned = all().remove(index);
+            let mut control = all().remove(index);
+            play(tuned.as_mut(), &Voice::ALL);
+            play(control.as_mut(), &Voice::ALL);
+            let mut sensitivity = Sensitivity::default();
+            for row in 0..Sensitivity::ROWS {
+                sensitivity.set(row, 1.0);
+            }
+            tuned.tune(sensitivity);
+            tuned.tick(0.5);
+            control.tick(0.5);
+            assert_ne!(
+                frame(tuned.as_ref(), area),
+                frame(control.as_ref(), area),
+                "{} ignores tuning",
+                tuned.name()
+            );
+        }
+        for mut scene in all().into_iter().skip(5) {
+            scene.on_event(&Event::Level(Sensitivity::default().master));
+            scene.tick(0.5);
+            let before = frame(scene.as_ref(), area);
+            scene.tick(0.5);
+            assert_ne!(
+                before,
+                frame(scene.as_ref(), area),
+                "{} ignores master",
+                scene.name()
+            );
+        }
+    }
+
+    #[test]
+    fn new_scenes_share_kick_motion_and_hide_zero_hits() {
+        let area = Rect::new(0, 0, 60, 20);
+        for age in [0.0, 0.2, 0.8, 1.5, 2.1] {
+            let mut expected = None;
+            for mut scene in all().into_iter().skip(5) {
+                let silent = frame(scene.as_ref(), area);
+                scene.on_event(&Event::Kick(0.0));
+                assert_eq!(silent, frame(scene.as_ref(), area));
+                scene.on_event(&Event::Kick(0.7));
+                scene.tick(age);
+                let mut actual = frame(scene.as_ref(), area);
+                for (cell, before) in actual.content.iter_mut().zip(&silent.content) {
+                    if cell == before {
+                        *cell = ratatui::buffer::Cell::default();
+                    }
+                }
+                if let Some(ref expected) = expected {
+                    assert_eq!(expected, &actual, "{} differs at {age}", scene.name());
+                }
+                expected = Some(actual);
             }
         }
     }

@@ -19,15 +19,22 @@ terminal:
 nooise --osc 127.0.0.1:9000
 ```
 
-Five scenes: `fluid` (a liquid surface the kick pushes a wave through),
-`system` (the pad is the sun, every other voice a planet on its own orbit
-with trails and moons; the kick sends a shockwave up through it), `binary`
-(two stars circling each other, each dragging a ring of particles the kick
-shoves off), `tide` (a water line the kick heaves a hump along), `rain`
-(drops falling at the level's rate; the kick splashes the bottom edge).
-Switch with `1`-`5`, `n`/`p`, or the arrow keys. `Tab` or `s` opens the
-settings overlay (listen address, scene, beat, per-voice levels, message
-counts, last message). `q` or `Ctrl+C` quits.
+Ten scenes, in switch order:
+
+- `fluid`: pad flow, bass floor, melodic shimmer, kick waves.
+- `system`: pad sun; bass, perc, clap, tonal, arp, lead and kick planets; melodic moons.
+- `binary`: pad rotation, bass separation, perc/clap shake, tonal/arp/lead particle rings, kick shove.
+- `tide`: bass waterline, pad swell, tonal/arp/lead ripples, kick heave.
+- `rain`: perc/clap and tonal/arp/lead drive falling drops; kick splashes the bottom.
+- `estuary`: pad aurora, bass dunes, perc rain, clap lightning, tonal moon, arp birds, lead ribbon; kick ground ripple.
+- `loom`: pad curtains, bass ribs, perc beads, clap crossbars, tonal waves, arp stairs, lead braid; kick lifts the foot.
+- `reef`: pad kelp, bass coral, perc bubbles, clap fans, tonal anemone, arp fish, lead ray; kick seabed ripple.
+- `city`: pad searchlights, bass skyline, perc traffic, clap beacons, tonal clock tower, arp windows, lead airship; kick street ripple.
+- `atlas`: pad shells, bass diamond, perc rosette, clap burst, tonal harmonic rings, arp square chase, lead spiral; paired voices light bridges, kick pulses below.
+
+Switch with `1`-`9` and `0` (atlas), `n`/`p`, or the arrow keys.
+`Tab` or `s` opens the settings overlay (listen address, scene, beat,
+per-voice levels, message counts, last message). `q` or `Ctrl+C` quits.
 
 Tuning: `t` opens the tune panel, one row per voice plus master, showing the
 full-drive level being edited, the level nooise reports right now, and the
@@ -42,9 +49,9 @@ What every scene shares:
   by the hit's level, so a kick at zero volume draws nothing.
 - Colour follows the chord the way the pad does: the new chord's tint swells
   in over its attack while the old one fades over its release.
-- Every voice drives something. Pad sets the flow and the sun, bass the
-  floor, water height, or star separation, perc and clap the rain rate and
-  particle shake, tonal, arp and lead the shimmer and the moons. Silence is still, whatever the tempo is doing.
+- The five layered scenes give each voice a distinct shape and its own clock.
+  Master adds background shimmer; kick drive swells the bottom-centre foot.
+  Silence is still, whatever the tempo is doing.
 - Sensitivity is one table (`Sensitivity` in `src/scene.rs`), calibrated
   from nooise's built-in songs. Recalibrate with nooise's
   `song_level_profile` test when the mix changes.
