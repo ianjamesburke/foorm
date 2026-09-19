@@ -21,11 +21,16 @@ The OSC address vocabulary is the only contract between them.
 - `src/gesture.rs` — `Gestures`: nooise's live gestures (`/nooise/gesture/<name>`)
   as a grade over the finished frame, one look per gesture (Bloom glow, Lift
   brighten and sweep the floor, Submerge darken and sink to blue, Echo
-  trails, Thin lattice). Amounts are nooise's, already enveloped. Two held
-  gestures crossfade by relative amount; they never stack.
+  trails, Thin lattice). Two sources, the larger wins: local `z x c v b`
+  holds with nooise's rise and return times (`press`/`release`, or `toggle`
+  where the terminal reports no releases), and nooise's mirrored amounts,
+  already enveloped. Two held gestures crossfade by relative amount; they
+  never stack.
 - `src/app.rs` — terminal loop, frame pacing, settings overlay, tune panel
   (`t`; owns the live `Sensitivity`, pushes edits via `Scene::tune`, prints
-  the table on quit when changed), keys.
+  the table on quit when changed), keys. Negotiates key-release reporting
+  once at start (`supports_keyboard_enhancement`); gesture keys hold when it
+  is there and toggle when it is not, never guessing a release.
 
 ## Local Contracts
 

@@ -9,9 +9,13 @@ use std::net::SocketAddr;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
 };
 use ratatui::Frame;
 use ratatui::backend::CrosstermBackend;
@@ -35,6 +39,8 @@ struct App {
     tune_row: usize,
     sensitivity: Sensitivity,
     gestures: Gestures,
+    /// The terminal reports key releases, so a gesture key can be held.
+    holds: bool,
     received: u64,
     kicks: u64,
     unknown: u64,
@@ -67,6 +73,20 @@ impl App {
     fn on_key(&mut self, key: KeyEvent) -> bool {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return false;
+        }
+        if let KeyCode::Char(c) = key.code
+            && let Some(gesture) = Gesture::ALL.into_iter().find(|g| g.key() == c)
+        {
+            match key.kind {
+                KeyEventKind::Press if self.holds => self.gestures.press(gesture),
+                KeyEventKind::Press => self.gestures.toggle(gesture),
+                KeyEventKind::Release => self.gestures.release(gesture),
+                KeyEventKind::Repeat => {}
+            }
+            return true;
+        }
+        if key.kind != KeyEventKind::Press {
+            return true;
         }
         if self.tune_open {
             match key.code {
@@ -228,18 +248,28 @@ impl App {
                     .collect::<Vec<_>>()
                     .join("  "),
             ),
-            Line::from(
+            Line::from(format!(
+                "{}   {}",
                 Gesture::ALL
                     .iter()
-                    .map(|g| format!("{} {} {:.2}", g.key(), g.name(), self.gestures.amount(*g)))
+                    .map(|g| {
+                        let held = if self.gestures.held(*g) { '*' } else { ' ' };
+                        format!("{}{} {:.2}", g.key(), held, self.gestures.amount(*g))
+                    })
                     .collect::<Vec<_>>()
                     .join("  "),
-            ),
+                if self.holds {
+                    "hold"
+                } else {
+                    "toggle (no key release)"
+                }
+            )),
             Line::from(format!("received {}", self.received)),
             Line::from(format!("kicks    {}", self.kicks)),
             Line::from(format!("unknown  {}", self.unknown)),
             Line::from(format!("last     {last}")),
-            Line::from("Tab/s close   t tune   q quit").alignment(Alignment::Right),
+            Line::from("z x c v b gestures   Tab/s close   t tune   q quit")
+                .alignment(Alignment::Right),
         ];
         f.render_widget(Clear, panel);
         f.render_widget(
@@ -258,10 +288,22 @@ pub fn run(listen: SocketAddr, events: Receiver<Event>) -> Result<(), Box<dyn Er
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     crossterm::execute!(stdout, EnterAlternateScreen)?;
+    // Key releases let a gesture key be held; a terminal without them gets
+    // press-to-toggle instead, never a guessed release.
+    let holds = supports_keyboard_enhancement().unwrap_or(false);
+    if holds {
+        crossterm::execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+        )?;
+    }
     let mut terminal = ratatui::Terminal::new(CrosstermBackend::new(stdout))?;
 
-    let result = event_loop(&mut terminal, listen, events);
+    let result = event_loop(&mut terminal, listen, events, holds);
 
+    if holds {
+        crossterm::execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    }
     disable_raw_mode()?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -279,6 +321,7 @@ fn event_loop(
     terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
     listen: SocketAddr,
     events: Receiver<Event>,
+    holds: bool,
 ) -> Result<Sensitivity, Box<dyn Error>> {
     let mut app = App {
         listen,
@@ -289,6 +332,7 @@ fn event_loop(
         tune_row: 0,
         sensitivity: Sensitivity::default(),
         gestures: Gestures::default(),
+        holds,
         received: 0,
         kicks: 0,
         unknown: 0,
@@ -310,6 +354,7 @@ fn event_loop(
             scene.resize(area);
             scene.tick(dt);
         }
+        app.gestures.tick(dt);
         last_frame = now;
         terminal.draw(|f| app.draw(f))?;
 
@@ -319,7 +364,6 @@ fn event_loop(
                 break;
             }
             if let TermEvent::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
                 && !app.on_key(key)
             {
                 return Ok(app.sensitivity);
@@ -343,6 +387,7 @@ mod tests {
             tune_row: 0,
             sensitivity: Sensitivity::default(),
             gestures: Gestures::default(),
+            holds: true,
             received: 0,
             kicks: 0,
             unknown: 0,
