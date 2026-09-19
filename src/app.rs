@@ -1,5 +1,7 @@
 //! The terminal loop: drain events into the scene, animate at a fixed frame
-//! rate, draw the scene full-screen, and overlay settings on request.
+//! rate, draw the scene full-screen, and overlay settings or the tune panel
+//! on request. The tune panel edits the shared `Sensitivity` table live and
+//! the final table is printed on quit so it can be pasted into `scene.rs`.
 
 use std::error::Error;
 use std::io;
@@ -19,7 +21,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::osc::{Event, Voice};
-use crate::scene::{self, Scene};
+use crate::scene::{self, Scene, Sensitivity};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
@@ -28,6 +30,9 @@ struct App {
     scenes: Vec<Box<dyn Scene>>,
     current: usize,
     settings_open: bool,
+    tune_open: bool,
+    tune_row: usize,
+    sensitivity: Sensitivity,
     received: u64,
     kicks: u64,
     unknown: u64,
@@ -60,10 +65,32 @@ impl App {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return false;
         }
+        if self.tune_open {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('t') => self.tune_open = false,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.tune_row = (self.tune_row + Sensitivity::ROWS - 1) % Sensitivity::ROWS;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.tune_row = (self.tune_row + 1) % Sensitivity::ROWS;
+                }
+                KeyCode::Left | KeyCode::Char('-') => self.scale_row(1.0 / 1.25),
+                KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => self.scale_row(1.25),
+                KeyCode::Char('r') => {
+                    let default = Sensitivity::default().get(self.tune_row);
+                    self.sensitivity.set(self.tune_row, default);
+                    self.push_sensitivity();
+                }
+                KeyCode::Char('q') => return false,
+                _ => {}
+            }
+            return true;
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc if !self.settings_open => return false,
             KeyCode::Esc => self.settings_open = false,
             KeyCode::Tab | KeyCode::Char('s') => self.settings_open = !self.settings_open,
+            KeyCode::Char('t') => self.tune_open = true,
             KeyCode::Char('n') | KeyCode::Right => {
                 self.current = (self.current + 1) % self.scenes.len();
             }
@@ -81,12 +108,86 @@ impl App {
         true
     }
 
+    /// Multiply the selected row's full level: log steps so every voice,
+    /// whether its level lives near 0.002 or 0.2, moves by the same feel.
+    fn scale_row(&mut self, by: f32) {
+        let now = self.sensitivity.get(self.tune_row);
+        self.sensitivity.set(self.tune_row, now * by);
+        self.push_sensitivity();
+    }
+
+    fn push_sensitivity(&mut self) {
+        for scene in &mut self.scenes {
+            scene.tune(self.sensitivity);
+        }
+    }
+
     fn draw(&self, f: &mut Frame) {
         let area = f.area();
         self.scenes[self.current].render(area, f.buffer_mut());
         if self.settings_open {
             self.draw_settings(f, area);
         }
+        if self.tune_open {
+            self.draw_tune(f, area);
+        }
+    }
+
+    /// One row per sensitivity entry: the full level being edited, the raw
+    /// level nooise is reporting now, and the drive that pair yields.
+    fn draw_tune(&self, f: &mut Frame, area: Rect) {
+        let width = 64.min(area.width);
+        let height = (Sensitivity::ROWS as u16 + 4).min(area.height);
+        let panel = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        let mut lines = Vec::with_capacity(Sensitivity::ROWS + 2);
+        lines.push(Line::from("   voice   full     level    drive"));
+        for row in 0..Sensitivity::ROWS {
+            let full = self.sensitivity.get(row);
+            let level = Voice::ALL
+                .get(row)
+                .map(|v| self.voice_levels[*v as usize])
+                .unwrap_or(self.level);
+            let drive = Sensitivity::drive(full, level);
+            let bar: String = (0..20)
+                .map(|i| {
+                    if (i as f32) < drive * 20.0 {
+                        '█'
+                    } else {
+                        '░'
+                    }
+                })
+                .collect();
+            let cursor = if row == self.tune_row { '>' } else { ' ' };
+            let text = format!(
+                "{cursor} {:<7} {full:<8.4} {level:<8.4} {bar} {drive:.2}",
+                Sensitivity::label(row)
+            );
+            let style = if row == self.tune_row {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            lines.push(Line::from(text).style(style));
+        }
+        lines.push(
+            Line::from("↑↓ row  ←→ ×1.25  r reset  t/Esc close  q quit+print")
+                .alignment(Alignment::Right),
+        );
+        f.render_widget(Clear, panel);
+        f.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" tune ")
+                    .style(Style::default().fg(Color::Gray).bg(Color::Black)),
+            ),
+            panel,
+        );
     }
 
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
@@ -127,7 +228,7 @@ impl App {
             Line::from(format!("kicks    {}", self.kicks)),
             Line::from(format!("unknown  {}", self.unknown)),
             Line::from(format!("last     {last}")),
-            Line::from("Tab/s close   q quit").alignment(Alignment::Right),
+            Line::from("Tab/s close   t tune   q quit").alignment(Alignment::Right),
         ];
         f.render_widget(Clear, panel);
         f.render_widget(
@@ -153,19 +254,29 @@ pub fn run(listen: SocketAddr, events: Receiver<Event>) -> Result<(), Box<dyn Er
     disable_raw_mode()?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
-    result
+    let sensitivity = result?;
+    if sensitivity != Sensitivity::default() {
+        println!(
+            "tuned sensitivity (paste into scene.rs Default):\n{}",
+            sensitivity.literal()
+        );
+    }
+    Ok(())
 }
 
 fn event_loop(
     terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
     listen: SocketAddr,
     events: Receiver<Event>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Sensitivity, Box<dyn Error>> {
     let mut app = App {
         listen,
         scenes: scene::all(),
         current: 0,
         settings_open: false,
+        tune_open: false,
+        tune_row: 0,
+        sensitivity: Sensitivity::default(),
         received: 0,
         kicks: 0,
         unknown: 0,
@@ -196,7 +307,7 @@ fn event_loop(
                 && key.kind == KeyEventKind::Press
                 && !app.on_key(key)
             {
-                return Ok(());
+                return Ok(app.sensitivity);
             }
         }
     }

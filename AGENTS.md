@@ -16,7 +16,9 @@ The OSC address vocabulary is the only contract between them.
   with attack/release envelopes, master level followed as `drive`), and the
   scenes. Scenes own animation state only; no I/O. Every scene receives every
   event even while hidden, so switching never shows a cold scene.
-- `src/app.rs` — terminal loop, frame pacing, settings overlay, keys.
+- `src/app.rs` — terminal loop, frame pacing, settings overlay, tune panel
+  (`t`; owns the live `Sensitivity`, pushes edits via `Scene::tune`, prints
+  the table on quit when changed), keys.
 
 ## Local Contracts
 
@@ -35,7 +37,9 @@ The OSC address vocabulary is the only contract between them.
   beat alone never animates anything.
 - Every level threshold lives in `Sensitivity`, calibrated from nooise's
   `song_level_profile` output and dated in its doc comment. Scenes never
-  hard-code an RMS. This table is where per-scene user settings will attach.
+  hard-code an RMS. The tune panel edits it live; a tuned table is pasted
+  back into `Sensitivity::default`, never persisted elsewhere. This table is
+  where per-scene user settings will attach.
 - Heavy rendering belongs here, never in nooise: foorm exists so the producer
   stays light.
 

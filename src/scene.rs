@@ -18,6 +18,8 @@ use crate::osc::{Event, Voice};
 pub trait Scene {
     fn name(&self) -> &'static str;
     fn on_event(&mut self, event: &Event);
+    /// Replace the sensitivity table; the tune panel calls this on every edit.
+    fn tune(&mut self, sensitivity: Sensitivity);
     fn tick(&mut self, dt: f32);
     fn render(&self, area: Rect, buf: &mut Buffer);
 }
@@ -25,8 +27,8 @@ pub trait Scene {
 pub fn all() -> Vec<Box<dyn Scene>> {
     vec![
         Box::new(Fluid::default()),
-        Box::new(Grid::default()),
-        Box::new(Orbit::default()),
+        Box::new(System::default()),
+        Box::new(Binary::default()),
         Box::new(Tide::default()),
         Box::new(Rain::default()),
     ]
@@ -39,8 +41,9 @@ const HUES: [f32; 5] = [205.0, 270.0, 325.0, 158.0, 38.0];
 /// built-in songs (`song_level_profile` in nooise's `src/fluid/osc.rs`,
 /// 2026-09-18, songs 1-16): roughly each voice's p90 while active. Lead was
 /// silent in every profiled song and carries a guess. The future per-scene
-/// settings UI edits this table; nothing else in a scene hard-codes a level.
-#[derive(Clone, Copy)]
+/// tune panel (`t`) edits this table live and prints it on quit so a tuned
+/// session can be pasted back here; nothing else in a scene hard-codes a level.
+#[derive(Clone, Copy, PartialEq)]
 pub struct Sensitivity {
     /// Indexed by `Voice`.
     voices: [f32; Voice::ALL.len()],
@@ -66,10 +69,42 @@ impl Default for Sensitivity {
 }
 
 impl Sensitivity {
+    /// Editable rows: one per voice, then master.
+    pub const ROWS: usize = Voice::ALL.len() + 1;
+
+    pub fn label(row: usize) -> &'static str {
+        Voice::ALL.get(row).map(|v| v.name()).unwrap_or("master")
+    }
+
+    pub fn get(&self, row: usize) -> f32 {
+        self.voices.get(row).copied().unwrap_or(self.master)
+    }
+
+    pub fn set(&mut self, row: usize, full: f32) {
+        let full = full.clamp(1e-4, 1.0);
+        match self.voices.get_mut(row) {
+            Some(v) => *v = full,
+            None => self.master = full,
+        }
+    }
+
     /// 0..1 drive for a level: square-root law so quiet material still
     /// registers, saturating at the calibrated full level.
-    fn drive(full: f32, level: f32) -> f32 {
+    pub fn drive(full: f32, level: f32) -> f32 {
         (level / full.max(1e-6)).clamp(0.0, 1.0).sqrt()
+    }
+
+    /// The table as it would be written in `Default`, for pasting back.
+    pub fn literal(&self) -> String {
+        let voices = Voice::ALL
+            .iter()
+            .map(|v| format!("{:.4}, // {}", self.voices[*v as usize], v.name()))
+            .collect::<Vec<_>>()
+            .join("\n        ");
+        format!(
+            "Sensitivity {{\n    voices: [\n        {voices}\n    ],\n    master: {:.4},\n}}",
+            self.master
+        )
     }
 }
 
@@ -248,6 +283,64 @@ fn paint(buf: &mut Buffer, area: Rect, x: u16, y: u16, v: f32, hue: f32) {
         .set_style(Style::default().fg(hsv(hue, 0.7, 0.12 + v * 0.88)));
 }
 
+/// A shaded disc centred at (cx, cy) in cells with radius r in rows; cells
+/// are ~2:1 so the disc is twice as wide as it is tall in cells.
+fn disc(buf: &mut Buffer, area: Rect, cx: f32, cy: f32, r: f32, v: f32, hue: f32) {
+    let r = r.max(0.3);
+    let (x0, x1) = (
+        (cx - r * 2.0 - 1.0).max(0.0) as u16,
+        (cx + r * 2.0 + 1.0) as u16,
+    );
+    let (y0, y1) = ((cy - r - 1.0).max(0.0) as u16, (cy + r + 1.0) as u16);
+    for y in y0..=y1.min(area.height.saturating_sub(1)) {
+        for x in x0..=x1.min(area.width.saturating_sub(1)) {
+            let dx = (x as f32 - cx) / 2.0;
+            let dy = y as f32 - cy;
+            let d = (dx * dx + dy * dy).sqrt() / r;
+            if d <= 1.0 {
+                // lit from the upper left, dark at the limb
+                let lit = 1.0 - 0.55 * d * d + 0.15 * (-dx - dy) / r;
+                paint(buf, area, x, y, v * lit.clamp(0.2, 1.0), hue);
+            }
+        }
+    }
+}
+
+/// Deterministic star per cell: most cells are empty; a few carry a faint
+/// star that twinkles with `shimmer`.
+fn starfield(buf: &mut Buffer, area: Rect, hue: f32, shimmer: f32, t: f32) {
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let mut z = (x as u64) << 32 | y as u64 | 0xA5A5;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            let r = (z ^ (z >> 31)) % 1000;
+            let v = if r < 12 {
+                0.12 + 0.25 * shimmer * ((t * 3.0 + r as f32).sin() * 0.5 + 0.5)
+            } else {
+                0.0
+            };
+            paint(buf, area, x, y, v, hue);
+        }
+    }
+}
+
+/// A ring expanding from the kick's anchor at the bottom centre, in
+/// normalised screen space; 0..1 per cell.
+fn kick_ring(hits: &[Hit], nx: f32, ny: f32, w: f32, h: f32) -> f32 {
+    let mut v = 0.0;
+    for hit in hits {
+        let (wx, wy) = hit.wobble;
+        let dx = (nx - 0.5 - wx / w) * 2.0;
+        let dy = ny - 1.0 - wy / h;
+        let dist = (dx * dx + dy * dy).sqrt();
+        let front = hit.age * 0.6;
+        let ring = (-((dist - front) * 9.0).powi(2)).exp();
+        v += ring * Pulse::fade(hit.age) * hit.level;
+    }
+    v
+}
+
 // ------------------------------------------------------------ Fluid
 
 /// A liquid field. The kick sits at the bottom centre and shoves a wave
@@ -262,6 +355,9 @@ pub struct Fluid {
 impl Scene for Fluid {
     fn name(&self) -> &'static str {
         "fluid"
+    }
+    fn tune(&mut self, sensitivity: Sensitivity) {
+        self.pulse.sensitivity = sensitivity;
     }
     fn on_event(&mut self, event: &Event) {
         self.pulse.on_event(event);
@@ -309,99 +405,213 @@ impl Scene for Fluid {
     }
 }
 
-// ------------------------------------------------------------ Grid
+// ------------------------------------------------------------ System
 
-/// A coarse grid of blocks. The kick lights the bottom-centre block and the
-/// flash spreads outward one block per frame; the beat walks a cursor whose
-/// brightness follows the level.
-#[derive(Default)]
-pub struct Grid {
+/// A solar system. The pad is the sun, swelling with its level; every other
+/// voice is a planet on its own orbit, sized by its drive and hurried by it,
+/// the melodic ones carrying a moon. Planets leave trails, so a voice that
+/// just played is still visible as a fading arc. The kick sends a shockwave
+/// up from the bottom centre through the whole field.
+pub struct System {
     pulse: Pulse,
+    t: f32,
+    planets: Vec<Planet>,
 }
 
-impl Grid {
-    const CELL_W: u16 = 4;
-    const CELL_H: u16 = 2;
+struct Planet {
+    voice: Voice,
+    orbit: f32,
+    tilt: f32,
+    angle: f32,
+    moon: bool,
 }
 
-impl Scene for Grid {
+impl Default for System {
+    fn default() -> Self {
+        let bodies = [
+            (Voice::Bass, false),
+            (Voice::Tonal, true),
+            (Voice::Perc, false),
+            (Voice::Arp, true),
+            (Voice::Clap, false),
+            (Voice::Lead, true),
+            (Voice::Kick, false),
+        ];
+        let planets = bodies
+            .into_iter()
+            .enumerate()
+            .map(|(i, (voice, moon))| Planet {
+                voice,
+                orbit: 0.14 + i as f32 * 0.055,
+                tilt: 0.55 + (i % 3) as f32 * 0.08,
+                angle: i as f32 * 2.1,
+                moon,
+            })
+            .collect();
+        Self {
+            pulse: Pulse::default(),
+            t: 0.0,
+            planets,
+        }
+    }
+}
+
+impl System {
+    const TRAIL: usize = 28;
+}
+
+impl Scene for System {
     fn name(&self) -> &'static str {
-        "grid"
+        "system"
+    }
+    fn tune(&mut self, sensitivity: Sensitivity) {
+        self.pulse.sensitivity = sensitivity;
     }
     fn on_event(&mut self, event: &Event) {
         self.pulse.on_event(event);
     }
     fn tick(&mut self, dt: f32) {
         self.pulse.tick(dt);
+        self.t += dt;
+        for p in &mut self.planets {
+            let drive = self.pulse.voice(p.voice);
+            // inner planets are quicker; a playing voice hurries its planet
+            p.angle += dt * (0.12 + 0.9 * drive) / p.orbit.sqrt();
+        }
     }
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let cols = (area.width / Self::CELL_W).max(1);
-        let rows = (area.height / Self::CELL_H).max(1);
-        let beat_col = (self.pulse.beat.floor() as u64 % cols as u64) as u16;
+        let w = area.width.max(1) as f32;
+        let h = area.height.max(1) as f32;
         let hue = self.pulse.hue();
         let pad = self.pulse.voice(Voice::Pad);
-        let bass = self.pulse.voice(Voice::Bass);
-        let rhythm = self.pulse.rhythm();
         let melody = self.pulse.melody();
-        for y in 0..area.height {
-            for x in 0..area.width {
-                let col = (x / Self::CELL_W).min(cols - 1);
-                let row = (y / Self::CELL_H).min(rows - 1);
-                // pad lights every block; melody sets a checker breathing on top
-                let checker = ((col + row) % 2) as f32;
-                let mut v = 0.05 + 0.45 * pad + 0.3 * melody * checker;
-                if col == beat_col {
-                    v += 0.6 * rhythm.max(self.pulse.drive * 0.5);
+        starfield(buf, area, hue, melody, self.t);
+        // kick shockwave under the bodies, so it never hides them
+        if !self.pulse.live.is_empty() {
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    let v = kick_ring(&self.pulse.live, x as f32 / w, y as f32 / h, w, h);
+                    if v > 0.1 {
+                        paint(buf, area, x, y, v * 0.6, hue - 15.0);
+                    }
                 }
-                if row + 1 == rows {
-                    v += 0.5 * bass;
+            }
+        }
+        let (cx, cy) = (w / 2.0, h / 2.0);
+        // orbits as faint dotted ellipses
+        for p in &self.planets {
+            for k in 0..64 {
+                let a = k as f32 / 64.0 * TAU;
+                let x = cx + a.cos() * p.orbit * h * 2.0;
+                let y = cy + a.sin() * p.orbit * h * p.tilt;
+                if x >= 0.0 && y >= 0.0 {
+                    paint(buf, area, x as u16, y as u16, 0.1, hue);
                 }
-                for hit in &self.pulse.live {
-                    let (wx, wy) = hit.wobble;
-                    let origin_col = (cols / 2) as f32 + wx;
-                    let origin_row = (rows - 1) as f32 + wy;
-                    let d = (col as f32 - origin_col)
-                        .abs()
-                        .max((row as f32 - origin_row).abs());
-                    let front = hit.age * 12.0;
-                    let ring = (-((d - front) * 0.8).powi(2)).exp();
-                    v += ring * Pulse::fade(hit.age) * hit.level;
+            }
+        }
+        // the sun
+        disc(
+            buf,
+            area,
+            cx,
+            cy,
+            1.2 + 2.2 * pad.max(self.pulse.drive * 0.5),
+            0.55 + 0.45 * pad,
+            hue + 20.0,
+        );
+        for (i, p) in self.planets.iter().enumerate() {
+            let drive = self.pulse.voice(p.voice);
+            let x = cx + p.angle.cos() * p.orbit * h * 2.0;
+            let y = cy + p.angle.sin() * p.orbit * h * p.tilt;
+            let phue = hue + (i as f32 - 3.0) * 22.0;
+            // trail: recent angles, fading back
+            for k in 1..Self::TRAIL {
+                let a = p.angle - k as f32 * 0.05;
+                let tx = cx + a.cos() * p.orbit * h * 2.0;
+                let ty = cy + a.sin() * p.orbit * h * p.tilt;
+                if tx >= 0.0 && ty >= 0.0 {
+                    let v = drive * (1.0 - k as f32 / Self::TRAIL as f32) * 0.5;
+                    paint(buf, area, tx as u16, ty as u16, v, phue);
                 }
-                let border = x % Self::CELL_W == 0 || y % Self::CELL_H == 0;
-                paint(buf, area, x, y, if border { v * 0.3 } else { v }, hue);
+            }
+            disc(
+                buf,
+                area,
+                x,
+                y,
+                0.4 + 1.6 * drive,
+                0.25 + 0.75 * drive,
+                phue,
+            );
+            if p.moon && drive > 0.05 {
+                let ma = p.angle * 5.0;
+                let mx = x + ma.cos() * (2.0 + 3.0 * drive) * 2.0;
+                let my = y + ma.sin() * (2.0 + 3.0 * drive) * 0.6;
+                if mx >= 0.0 && my >= 0.0 {
+                    paint(
+                        buf,
+                        area,
+                        mx as u16,
+                        my as u16,
+                        0.4 + 0.6 * drive,
+                        phue + 30.0,
+                    );
+                }
             }
         }
     }
 }
 
-// ------------------------------------------------------------ Orbit
+// ------------------------------------------------------------ Binary
 
-/// Particles circling the centre at a speed set by the level. The kick
-/// shoves them outward from the bottom, and they settle back on their orbits.
-pub struct Orbit {
+/// Two stars circling each other, each dragging a ring of particles. Bass
+/// pulls the pair apart, the pad spins the system, melody brightens the
+/// rings, rhythm shakes the particles. The kick shoves the particles nearest
+/// the bottom outward and they spring back onto their rings.
+pub struct Binary {
     pulse: Pulse,
-    /// (angle, radius, radial velocity) per particle
-    particles: Vec<(f32, f32, f32)>,
+    t: f32,
+    /// Angle of the pair about the shared centre.
+    angle: f32,
+    /// (star index, angle, radius, radial velocity) per particle
+    particles: Vec<(usize, f32, f32, f32)>,
 }
 
-impl Default for Orbit {
+impl Default for Binary {
     fn default() -> Self {
-        let particles = (0..96)
+        let particles = (0..120)
             .map(|i| {
-                let f = i as f32 / 96.0;
-                (f * TAU, 0.15 + (f * 7.0).fract() * 0.3, 0.0)
+                let f = i as f32 / 120.0;
+                (i % 2, f * TAU * 2.0, 0.06 + (f * 7.0).fract() * 0.12, 0.0)
             })
             .collect();
         Self {
             pulse: Pulse::default(),
+            t: 0.0,
+            angle: 0.0,
             particles,
         }
     }
 }
 
-impl Scene for Orbit {
+impl Binary {
+    /// Star centres in normalised height units around the screen centre.
+    fn stars(&self) -> [(f32, f32); 2] {
+        let sep = 0.14 + 0.16 * self.pulse.voice(Voice::Bass);
+        let (c, s) = (self.angle.cos() * sep, self.angle.sin() * sep * 0.5);
+        [(c, s), (-c, -s)]
+    }
+    fn rest(&self) -> f32 {
+        0.09 + 0.05 * self.pulse.melody()
+    }
+}
+
+impl Scene for Binary {
     fn name(&self) -> &'static str {
-        "orbit"
+        "binary"
+    }
+    fn tune(&mut self, sensitivity: Sensitivity) {
+        self.pulse.sensitivity = sensitivity;
     }
     fn on_event(&mut self, event: &Event) {
         self.pulse.on_event(event);
@@ -409,51 +619,63 @@ impl Scene for Orbit {
             let (wx, _) = wobble(self.pulse.hits);
             for p in &mut self.particles {
                 // push hardest on the particles nearest the bottom
-                let bottom = (p.0 + wx * 0.05).sin().max(0.0);
-                p.2 += 0.6 * bottom * level.clamp(0.0, 1.0);
+                let bottom = (p.1 + wx * 0.05).sin().max(0.0);
+                p.3 += 0.5 * bottom * level.clamp(0.0, 1.0);
             }
         }
     }
     fn tick(&mut self, dt: f32) {
         self.pulse.tick(dt);
-        let speed = self.pulse.voice(Voice::Pad).max(self.pulse.drive * 0.6);
-        // bass breathes the whole system outward
-        let rest = 0.3 + 0.12 * self.pulse.voice(Voice::Bass);
+        self.t += dt;
+        let pad = self.pulse.voice(Voice::Pad).max(self.pulse.drive * 0.6);
+        self.angle += dt * (0.1 + 0.5 * pad);
+        let rest = self.rest();
+        let shake = self.pulse.rhythm();
         for p in &mut self.particles {
-            p.0 += dt * (0.3 + p.1) * speed;
-            p.1 += p.2 * dt;
-            p.2 -= (p.1 - rest) * 4.0 * dt; // spring back toward orbit
-            p.2 *= 1.0 - 2.5 * dt;
+            p.1 += dt * (1.2 + 3.0 * pad) * (0.1 / p.2.max(0.03));
+            p.2 += p.3 * dt;
+            p.3 -= (p.2 - rest - (p.1 * 7.0).sin() * 0.03 * shake) * 6.0 * dt;
+            p.3 *= 1.0 - 3.0 * dt;
         }
     }
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let w = area.width.max(1) as f32;
         let h = area.height.max(1) as f32;
         let hue = self.pulse.hue();
-        for y in 0..area.height {
-            for x in 0..area.width {
-                paint(buf, area, x, y, 0.0, hue);
-            }
-        }
-        for &(angle, radius, vel) in &self.particles {
-            let x = 0.5 + angle.cos() * radius;
-            let y = 0.5 + angle.sin() * radius;
-            if !(0.0..1.0).contains(&x) || !(0.0..1.0).contains(&y) {
+        let pad = self.pulse.voice(Voice::Pad);
+        let melody = self.pulse.melody();
+        starfield(buf, area, hue, melody, self.t);
+        let stars = self.stars();
+        let to_cells = |(ux, uy): (f32, f32)| (w / 2.0 + ux * h * 2.0, h / 2.0 + uy * h);
+        for &(star, angle, radius, vel) in &self.particles {
+            let (sx, sy) = stars[star];
+            let (x, y) = to_cells((sx + angle.cos() * radius, sy + angle.sin() * radius * 0.6));
+            if x < 0.0 || y < 0.0 || x >= w || y >= h {
                 continue;
             }
-            let v = (0.3 + 0.4 * self.pulse.melody() + vel.abs() * 1.5).clamp(0.0, 1.0);
-            paint(
-                buf,
-                area,
-                (x * w) as u16,
-                (y * h) as u16,
-                v,
-                hue + vel * 60.0,
-            );
+            let v = (0.25 + 0.5 * melody + vel.abs() * 2.0).clamp(0.0, 1.0);
+            let shue = hue + if star == 0 { 25.0 } else { -25.0 };
+            paint(buf, area, x as u16, y as u16, v, shue + vel * 80.0);
+        }
+        for (i, &s) in stars.iter().enumerate() {
+            let (x, y) = to_cells(s);
+            let shue = hue + if i == 0 { 25.0 } else { -25.0 };
+            disc(buf, area, x, y, 0.8 + 1.4 * pad, 0.6 + 0.4 * pad, shue);
         }
         if let (Some(hit), Some(bottom)) = (self.pulse.anchor(), area.height.checked_sub(1)) {
             let kx = ((w / 2.0) + hit.wobble.0).clamp(0.0, w - 1.0) as u16;
             paint(buf, area, kx, bottom, Pulse::fade(hit.age) * hit.level, hue);
+            for x in 0..area.width {
+                let v = kick_ring(&self.pulse.live, x as f32 / w, 1.0, w, h);
+                paint(
+                    buf,
+                    area,
+                    x,
+                    bottom,
+                    v.max(if x == kx { hit.level } else { 0.0 }),
+                    hue,
+                );
+            }
         }
     }
 }
@@ -472,6 +694,9 @@ pub struct Tide {
 impl Scene for Tide {
     fn name(&self) -> &'static str {
         "tide"
+    }
+    fn tune(&mut self, sensitivity: Sensitivity) {
+        self.pulse.sensitivity = sensitivity;
     }
     fn on_event(&mut self, event: &Event) {
         self.pulse.on_event(event);
@@ -555,6 +780,9 @@ impl Rain {
 impl Scene for Rain {
     fn name(&self) -> &'static str {
         "rain"
+    }
+    fn tune(&mut self, sensitivity: Sensitivity) {
+        self.pulse.sensitivity = sensitivity;
     }
     fn on_event(&mut self, event: &Event) {
         self.pulse.on_event(event);
@@ -723,6 +951,21 @@ mod tests {
         }
         assert!(pulse.drive < 0.01);
         assert!(pulse.voice(Voice::Bass) < 0.01);
+    }
+
+    #[test]
+    fn sensitivity_rows_cover_every_voice_and_master() {
+        let mut s = Sensitivity::default();
+        assert_eq!(Sensitivity::label(Sensitivity::ROWS - 1), "master");
+        s.set(0, 0.5);
+        s.set(Sensitivity::ROWS - 1, 0.25);
+        assert_eq!(s.get(0), 0.5);
+        assert_eq!(s.master, 0.25);
+        assert!(s.literal().contains("0.5000, // pad"));
+        assert!(s.literal().contains("master: 0.2500"));
+        let mut scene = System::default();
+        scene.tune(s);
+        assert!(scene.pulse.sensitivity == s);
     }
 
     #[test]
