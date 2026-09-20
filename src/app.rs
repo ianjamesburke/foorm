@@ -292,7 +292,10 @@ fn event_loop(
         }
         let now = Instant::now();
         let dt = now.duration_since(last_frame).as_secs_f32();
+        let size = terminal.size()?;
+        let area = Rect::new(0, 0, size.width, size.height);
         for scene in &mut app.scenes {
+            scene.resize(area);
             scene.tick(dt);
         }
         last_frame = now;
@@ -318,7 +321,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn digits_and_navigation_reach_all_ten_scenes() {
+    fn digits_keep_their_scenes_and_navigation_reaches_every_scene() {
         let mut app = App {
             listen: "127.0.0.1:9000".parse().unwrap(),
             scenes: scene::all(),
@@ -341,8 +344,16 @@ mod tests {
         }
         assert_eq!(app.scenes[app.current].name(), "atlas");
         app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        assert_eq!(app.current, 0);
+        assert_eq!(app.current, 10);
+        for expected in (11..app.scenes.len()).chain(0..=9) {
+            app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+            assert_eq!(app.current, expected);
+        }
+        for expected in (0..9).rev().chain((9..app.scenes.len()).rev()) {
+            app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+            assert_eq!(app.current, expected);
+        }
         app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        assert_eq!(app.current, 9);
+        assert_eq!(app.current, 8);
     }
 }

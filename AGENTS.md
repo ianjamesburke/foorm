@@ -14,8 +14,9 @@ The OSC address vocabulary is the only contract between them.
 - `src/scene.rs` — `Scene` trait, `all()` (the switchable scene list, in key
   order), the shared `Pulse` bookkeeping (kick hits with level, chord layers
   with attack/release envelopes, per-voice and master drives), shared layer
-  clocks and drawing helpers, and the ten scenes. Scenes own animation state
-  only; no I/O. Every scene receives every event even while hidden, so
+  clocks and drawing helpers, and thirteen scenes (seven neon fields, including
+  half-block, Bayer-dithered and retained-trail rendering). Scenes own animation
+  state only; no I/O. Every scene receives every event even while hidden, so
   switching never shows a cold scene.
 - `src/app.rs` — terminal loop, frame pacing, settings overlay, tune panel
   (`t`; owns the live `Sensitivity`, pushes edits via `Scene::tune`, prints

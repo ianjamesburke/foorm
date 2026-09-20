@@ -7,6 +7,7 @@
 //! Ambient motion follows each voice's level through `Sensitivity`: silence
 //! is still, and every layer nooise plays has something on screen.
 
+use std::cell::RefCell;
 use std::f32::consts::TAU;
 
 use ratatui::buffer::Buffer;
@@ -21,6 +22,8 @@ pub trait Scene {
     /// Replace the sensitivity table; the tune panel calls this on every edit.
     fn tune(&mut self, sensitivity: Sensitivity);
     fn tick(&mut self, dt: f32);
+    /// Prepare size-dependent animation state, including scenes not on screen.
+    fn resize(&mut self, _area: Rect) {}
     fn render(&self, area: Rect, buf: &mut Buffer);
 }
 
@@ -36,6 +39,9 @@ pub fn all() -> Vec<Box<dyn Scene>> {
         Box::new(Reef::default()),
         Box::new(City::default()),
         Box::new(Atlas::default()),
+        Box::new(Veil::default()),
+        Box::new(Ion::default()),
+        Box::new(Echo::default()),
     ]
 }
 
@@ -881,42 +887,14 @@ impl Layers {
         starfield(buf, area, self.pulse.hue(), self.pulse.drive, self.ambient);
     }
 
-    /// All five scenes share the same hit trajectory, independent of the mix.
-    /// The sustained kick meter is a separate, stationary foot at the anchor.
+    /// Atlas uses the same scalar anchor and trajectory as the neon fields.
     fn kick(&self, area: Rect, buf: &mut Buffer) {
-        let w = area.width.max(1) as f32;
-        let h = area.height.max(1) as f32;
+        let space = FieldSpace::new(area);
         let hue = self.pulse.hue();
         for y in 0..area.height {
             for x in 0..area.width {
-                let v = kick_ring(&self.pulse.live, x as f32 / w, y as f32 / h, w, h);
-                Ink::new(v, 0.0, '~').draw(buf, area, x, y, hue);
-            }
-        }
-        let drive = self.pulse.voice(Voice::Kick);
-        if drive > 0.0 {
-            disc(
-                buf,
-                area,
-                w * 0.5,
-                h - 1.0,
-                (h * 0.16 + 1.0) * drive,
-                drive,
-                hue,
-            );
-        }
-        for hit in &self.pulse.live {
-            let v = hit.level * Pulse::fade(hit.age);
-            if v > 0.0 {
-                disc(
-                    buf,
-                    area,
-                    w * 0.5 + hit.wobble.0,
-                    h - 1.0 + hit.wobble.1,
-                    (1.0 + h * 0.12 * Pulse::fade(hit.age)) * hit.level,
-                    v,
-                    hue,
-                );
+                let value = self.kick_field(space, x as f32 / space.w, y as f32 / space.h);
+                Ink::new(value, 0.0, '~').draw(buf, area, x, y, hue);
             }
         }
     }
@@ -973,9 +951,140 @@ fn field(area: Rect, buf: &mut Buffer, hue: f32, sample: impl Fn(f32, f32) -> In
     }
 }
 
+/// Additive field light with energy-weighted hue offsets.
+/// Soft compression retains detail where several voices overlap.
+#[derive(Clone, Copy, Default)]
+struct Glow {
+    energy: f32,
+    offset: f32,
+}
+
+impl Glow {
+    fn add(&mut self, energy: f32, offset: f32) {
+        self.energy += energy;
+        self.offset += energy * offset;
+    }
+
+    fn value(self) -> f32 {
+        self.energy / (0.5 + self.energy)
+    }
+
+    fn tint(self) -> f32 {
+        self.offset / self.energy.max(f32::EPSILON)
+    }
+}
+
+const SHADES: [char; 5] = [' ', '░', '▒', '▓', '█'];
+
+/// Ordered 4x4 thresholds at bin centres, stable in local scene coordinates.
+fn bayer(x: u16, y: u16) -> f32 {
+    const MATRIX: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+    (MATRIX[usize::from(y % 4)][usize::from(x % 4)] as f32 + 0.5) / 16.0
+}
+
+fn scanline(y: u16) -> f32 {
+    if y.is_multiple_of(2) { 1.0 } else { 0.86 }
+}
+
+fn shade(buf: &mut Buffer, area: Rect, x: u16, y: u16, v: f32, hue: f32) {
+    let v = v.clamp(0.0, 1.0);
+    let index = (v * 4.0).round() as usize;
+    buf[(area.x + x, area.y + y)]
+        .set_char(SHADES[index])
+        .set_style(
+            Style::default()
+                .fg(hsv(hue, 0.85, v * scanline(y)))
+                .bg(Color::Black),
+        );
+}
+
+/// Screen coordinates in rows, corrected for cells twice as tall as wide.
+#[derive(Clone, Copy)]
+struct FieldSpace {
+    w: f32,
+    h: f32,
+    scale: f32,
+}
+
+impl FieldSpace {
+    fn new(area: Rect) -> Self {
+        let w = area.width.max(1) as f32;
+        let h = area.height.max(1) as f32;
+        Self {
+            w,
+            h,
+            scale: h.min(w * 0.5),
+        }
+    }
+
+    fn distance(self, x: f32, y: f32, cx: f32, cy: f32) -> f32 {
+        let dx = (x - cx) * self.w * 0.5;
+        let dy = (y - cy) * self.h;
+        (dx * dx + dy * dy).sqrt() / self.scale
+    }
+}
+
+impl Layers {
+    /// Common scalar kick: expanding circular front and a sustained foot.
+    /// The centre varies only by the shared one-cell wobble of each hit.
+    fn kick_field(&self, space: FieldSpace, x: f32, y: f32) -> f32 {
+        let mut value = self.pulse.voice(Voice::Kick) * ridge(space.distance(x, y, 0.5, 1.0), 0.28);
+        for hit in &self.pulse.live {
+            let distance = space.distance(
+                x,
+                y,
+                0.5 + hit.wobble.0 / space.w,
+                1.0 + hit.wobble.1 / space.h,
+            );
+            value += hit.level * Pulse::fade(hit.age) * ridge(distance - hit.age * 0.6, 0.10);
+        }
+        value
+    }
+
+    fn atmosphere(&self, x: f32, y: f32) -> Glow {
+        let mut glow = Glow::default();
+        glow.add(
+            self.pulse.drive * 0.18 * (0.6 + 0.4 * (x * 5.0 + y * 3.0 - self.ambient * 0.2).sin()),
+            60.0,
+        );
+        glow
+    }
+}
+
+fn neon_field(area: Rect, buf: &mut Buffer, layers: &Layers, sample: impl Fn(f32, f32) -> Glow) {
+    draw_field(area, buf, layers, sample, shade);
+}
+
+fn dithered_shade(buf: &mut Buffer, area: Rect, x: u16, y: u16, v: f32, hue: f32) {
+    shade(buf, area, x, y, v, hue);
+    let index = (v.clamp(0.0, 1.0) * 4.0 + bayer(x, y)).floor() as usize;
+    buf[(area.x + x, area.y + y)].set_char(SHADES[index.min(4)]);
+}
+
+type Shader = fn(&mut Buffer, Rect, u16, u16, f32, f32);
+
+fn draw_field(
+    area: Rect,
+    buf: &mut Buffer,
+    layers: &Layers,
+    sample: impl Fn(f32, f32) -> Glow,
+    shader: Shader,
+) {
+    let space = FieldSpace::new(area);
+    let hue = layers.pulse.hue() - 120.0;
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let (nx, ny) = (x as f32 / space.w, y as f32 / space.h);
+            let mut glow = sample(nx, ny);
+            glow.add(layers.kick_field(space, nx, ny) * 1.5, 180.0);
+            shader(buf, area, x, y, glow.value(), hue + glow.tint());
+        }
+    }
+}
+
 // ------------------------------------------------------------ Estuary
 
-/// Aurora, dunes, weather, moon, birds and a comet occupy separate depths.
+/// A striped sun above a breathing grid and broad spectral sky bands.
 #[derive(Default)]
 pub struct Estuary {
     layers: Layers,
@@ -998,108 +1107,68 @@ impl Scene for Estuary {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let l = &self.layers;
         let p = &l.pulse;
-        let w = area.width.max(1) as f32;
-        let h = area.height.max(1) as f32;
-        l.background(area, buf);
-        field(area, buf, p.hue(), |x, y| {
-            let (nx, ny) = (x / w, y / h);
-            let mut ink = Ink::default();
-            let pad = p.voice(Voice::Pad);
-            let curtain = 0.16 + 0.07 * (nx * 9.0 + l.phase(Voice::Pad)).sin();
-            let folds = 0.65 + 0.35 * (nx * 45.0 - l.phase(Voice::Pad)).sin().abs();
-            ink.layer(
-                pad * ridge(ny - curtain, 0.08 + pad * 0.1) * folds,
-                -30.0,
-                '|',
-            );
-
-            let bass = p.voice(Voice::Bass);
-            for depth in 0..3 {
-                let d = depth as f32;
-                let ground = 0.78 + d * 0.075 - bass * 0.12
-                    + (nx * (7.0 + d * 3.0) + l.phase(Voice::Bass) * 0.7 + d).sin() * 0.045;
-                if ny >= ground {
-                    let contour = ((ny - ground) * h).rem_euclid(3.0);
-                    ink.layer(
-                        bass * (0.4 + d * 0.15),
-                        35.0 + d * 12.0,
-                        if contour < 1.0 { '=' } else { ':' },
-                    );
-                }
-            }
-
-            // Weather occupies opposite banks, so clap and perc remain distinct.
-            if nx > 0.57 && ny < 0.76 {
-                let streak = (nx * 22.0 + ny * 3.0).rem_euclid(1.0);
-                let fall = (ny * 6.0 - l.phase(Voice::Perc) * 3.0 + nx * 4.0).rem_euclid(1.0);
-                ink.layer(
-                    p.voice(Voice::Perc) * ridge(streak - 0.5, 0.16) * ridge(fall - 0.5, 0.4),
-                    -65.0,
-                    '/',
+        let space = FieldSpace::new(area);
+        let sun_y = 0.38 + 0.06 * (l.phase(Voice::Pad) * 0.18).sin();
+        neon_field(area, buf, l, |x, y| {
+            let mut glow = l.atmosphere(x, y);
+            let sun = space.distance(x, y, 0.5, sun_y);
+            let stripes = 0.22 + 0.78 * ridge((y * 19.0).fract() - 0.5, 0.35);
+            glow.add(p.voice(Voice::Pad) * ridge(sun, 0.43) * 2.8 * stripes, 90.0);
+            let depth = ((y - 0.57) / 0.43).max(0.0);
+            if depth > 0.0 {
+                let bass = p.voice(Voice::Bass);
+                let perspective = 1.0 / (depth + 0.16);
+                let columns = ridge(((x - 0.5) * perspective * 5.0).sin(), 0.18);
+                let rows = ridge(
+                    (perspective * (2.0 + bass * 0.7) - l.phase(Voice::Bass) * 0.45).sin(),
+                    0.22,
+                );
+                glow.add(bass * (0.12 + columns.max(rows)) * depth.sqrt(), 180.0);
+                glow.add(
+                    p.voice(Voice::Perc)
+                        * ridge(
+                            (x * 15.0 + depth * 8.0 - l.phase(Voice::Perc) * 1.8).sin(),
+                            0.32,
+                        )
+                        * depth,
+                    0.0,
                 );
             }
-            if (0.22..0.72).contains(&ny) {
-                let zig = ((ny * 18.0).floor() + l.phase(Voice::Clap) * 2.0).sin();
-                for branch in [0.13, 0.28] {
-                    ink.layer(
-                        p.voice(Voice::Clap)
-                            * ridge(
-                                nx - branch - zig * 0.035,
-                                0.018 + 0.016 * p.voice(Voice::Clap),
-                            ),
-                        100.0,
-                        '#',
-                    );
-                }
-            }
-
-            let tonal = p.voice(Voice::Tonal);
-            let radius = h.min(w / 2.0) * (0.055 + tonal * 0.065);
-            let dx = (x - w * 0.76) / 2.0;
-            let dy = y - h * 0.24;
-            let distance = dx.hypot(dy);
-            ink.layer(tonal * ridge(distance, radius), 65.0, 'O');
-            ink.layer(tonal * 0.6 * ridge(distance - radius, 1.1), 65.0, '+');
-
-            let arp = p.voice(Voice::Arp);
-            for bird in 0..4 {
-                let b = bird as f32;
-                let bx = (0.12 + b * 0.23 + l.phase(Voice::Arp) * 0.035).rem_euclid(1.0);
-                let dx = (nx - bx).abs();
-                if dx < 0.055 {
-                    let wing =
-                        0.48 + b.sin() * 0.055 - dx * (1.0 + l.phase(Voice::Arp).sin() * 0.4);
-                    ink.layer(
-                        arp * ridge(ny - wing, 0.028 + arp * 0.025),
-                        -100.0,
-                        if nx < bx { '\\' } else { '/' },
-                    );
-                }
-            }
-            let lead = p.voice(Voice::Lead);
-            let ribbon = 0.34 + 0.055 * (nx * 9.0 - l.phase(Voice::Lead) * 1.7).sin();
-            let segments = 0.55 + 0.45 * (nx * 17.0 - l.phase(Voice::Lead) * 3.0).cos().abs();
-            ink.layer(
-                lead * ridge(ny - ribbon, 0.025 + lead * 0.035) * segments,
-                140.0,
-                '>',
+            glow.add(
+                p.voice(Voice::Clap)
+                    * ridge(
+                        y - 0.55 - (x * 12.0 + l.phase(Voice::Clap) * 0.6).sin() * 0.035,
+                        0.095,
+                    ),
+                180.0,
             );
-            ink
+            glow.add(
+                p.voice(Voice::Tonal)
+                    * ridge(
+                        y - 0.13 - (x * 4.0 + l.phase(Voice::Tonal) * 0.25).sin() * 0.05,
+                        0.15,
+                    ),
+                20.0,
+            );
+            glow.add(
+                p.voice(Voice::Arp)
+                    * ridge(
+                        y - 0.29 - (x * 8.0 - l.phase(Voice::Arp) * 0.45).sin() * 0.04,
+                        0.10,
+                    )
+                    * (0.6 + 0.4 * (x * 24.0 - l.phase(Voice::Arp)).cos()),
+                180.0,
+            );
+            glow.add(
+                p.voice(Voice::Lead)
+                    * ridge(
+                        y - 0.42 + (x - 0.5) * 0.18 - (l.phase(Voice::Lead) * 0.3).sin() * 0.06,
+                        0.085,
+                    ),
+                120.0,
+            );
+            glow
         });
-        l.kick(area, buf);
-    }
-}
-
-/// Labels are clipped to the scene rectangle, including offset rectangles.
-fn caption(buf: &mut Buffer, area: Rect, at: (u16, u16), text: &str, hue: f32) {
-    for (i, c) in text.chars().enumerate() {
-        let x = usize::from(at.0) + i;
-        if x >= usize::from(area.width) || at.1 >= area.height {
-            break;
-        }
-        buf[(area.x + x as u16, area.y + at.1)]
-            .set_char(c)
-            .set_style(Style::default().fg(hsv(hue, 0.5, 0.65)));
     }
 }
 
@@ -1115,7 +1184,7 @@ const INSTRUMENTS: [Voice; 7] = [
 
 // ------------------------------------------------------------ Loom
 
-/// Seven labelled warp ribbons, each with its own weave and clock.
+/// Slow interference bands, each voice with its own direction and wavelength.
 #[derive(Default)]
 pub struct Loom {
     layers: Layers,
@@ -1138,77 +1207,40 @@ impl Scene for Loom {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let l = &self.layers;
         let p = &l.pulse;
-        let w = area.width.max(1) as f32;
-        let h = area.height.max(1) as f32;
-        let lane = w / INSTRUMENTS.len() as f32;
-        l.background(area, buf);
-        field(area, buf, p.hue(), |x, y| {
-            let mut ink = Ink::default();
-            if y < 3.0 || y >= h - 2.0 {
-                return ink;
+        let space = FieldSpace::new(area);
+        // Directions, wavelengths and broad envelopes make solos recognisable.
+        let waves = [
+            (0.4, 1.0, 6.0, 0.22, 0.44, 90.0),
+            (0.0, 1.0, 13.0, 0.84, 0.32, 180.0),
+            (1.0, 0.3, 25.0, 0.64, 0.35, 0.0),
+            (-0.7, 1.0, 21.0, 0.45, 0.28, 180.0),
+            (1.0, 0.7, 11.0, 0.16, 0.30, 25.0),
+            (-1.0, 0.4, 32.0, 0.35, 0.28, 150.0),
+            (0.8, 1.0, 9.0, 0.59, 0.32, 100.0),
+        ];
+        neon_field(area, buf, l, |x, y| {
+            let mut glow = l.atmosphere(x, y);
+            let u = (x - 0.5) * space.w / (2.0 * space.scale);
+            let v = y * space.h / space.scale;
+            for (i, voice) in INSTRUMENTS.iter().enumerate() {
+                let (dx, dy, frequency, centre, width, offset) = waves[i];
+                let t = l.phase(*voice) * 0.28;
+                let bend = (u * 3.0 - t * 0.4).sin() * 0.5;
+                let wave = ((u * dx + v * dy) * frequency + bend - t).sin();
+                let interference = 0.25 + 0.75 * wave.powi(2);
+                glow.add(
+                    p.voice(*voice) * ridge(y - centre, width) * interference,
+                    offset,
+                );
             }
-            let i = ((x / lane) as usize).min(INSTRUMENTS.len() - 1);
-            let voice = INSTRUMENTS[i];
-            let d = p.voice(voice);
-            let t = l.phase(voice);
-            let u = (x / lane).fract() * 2.0 - 1.0;
-            let v = y / h;
-            let a = v * TAU * 2.0 - t * 1.4;
-            let offset = i as f32 * 32.0 - 90.0;
-            let (coverage, glyph) = match voice {
-                Voice::Pad => (
-                    ridge(u - a.sin() * 0.25, 0.4 + d * 0.4)
-                        * (0.65 + 0.35 * (u * 10.0 + t).cos().abs()),
-                    '|',
-                ),
-                Voice::Bass => (
-                    ridge(u, 0.3 + d * 0.6) * (0.5 + 0.5 * (v * 30.0 - t).sin().abs()),
-                    '=',
-                ),
-                Voice::Perc => {
-                    let bead = (v * 6.0 - t).rem_euclid(1.0) * 2.0 - 1.0;
-                    ((1.0 - (u.abs() + bead.abs()) / (0.5 + d)).max(0.0), 'o')
-                }
-                Voice::Clap => {
-                    let bar = (v * 5.0 - t * 1.7).rem_euclid(1.0);
-                    (ridge(bar - 0.5, 0.2 + d * 0.2) * ridge(u, 1.2), '#')
-                }
-                Voice::Tonal => (
-                    ridge(u - a.sin() * 0.55, 0.3 + d * 0.3)
-                        .max(ridge(u + a.sin() * 0.55, 0.16) * 0.55),
-                    '~',
-                ),
-                Voice::Arp => {
-                    let step = ((v * 9.0 - t * 2.0).floor()).rem_euclid(4.0) / 3.0;
-                    (ridge(u - (step - 0.5), 0.3 + d * 0.25), '+')
-                }
-                Voice::Lead => (
-                    ridge(u - a.cos() * 0.5, 0.22 + d * 0.3)
-                        .max(ridge(u + a.cos() * 0.5, 0.22 + d * 0.3)),
-                    '/',
-                ),
-                Voice::Kick => (0.0, ' '),
-            };
-            ink.layer(d * coverage, offset, glyph);
-            ink
+            glow
         });
-        for (i, voice) in INSTRUMENTS.iter().enumerate() {
-            let x = (lane * (i as f32 + 0.5) - voice.name().len() as f32 / 2.0).max(0.0) as u16;
-            caption(
-                buf,
-                area,
-                (x, 1),
-                voice.name(),
-                p.hue() + i as f32 * 32.0 - 90.0,
-            );
-        }
-        l.kick(area, buf);
     }
 }
 
 // ------------------------------------------------------------ Reef
 
-/// A living reef with large silhouettes at different depths.
+/// Seven drifting metaballs merge into pools of light at their intersections.
 #[derive(Default)]
 pub struct Reef {
     layers: Layers,
@@ -1231,110 +1263,57 @@ impl Scene for Reef {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let l = &self.layers;
         let p = &l.pulse;
-        let w = area.width.max(1) as f32;
-        let h = area.height.max(1) as f32;
-        let scale = h.min(w / 2.0);
-        l.background(area, buf);
-        field(area, buf, p.hue(), |x, y| {
-            let (nx, ny) = (x / w, y / h);
-            let mut ink = Ink::default();
-            let pad = p.voice(Voice::Pad);
-            for stalk in 0..3 {
-                let s = stalk as f32;
-                if ny > 0.22 + s * 0.09 && ny < 0.94 {
-                    let stem = 0.055
-                        + s * 0.085
-                        + (ny * 9.0 + l.phase(Voice::Pad) + s).sin() * 0.035 * (1.0 - ny);
-                    let leaves = (ny * 22.0 + s * 2.0).sin().powi(2);
-                    ink.layer(pad * ridge(nx - stem, 0.012 + leaves * 0.042), -55.0, '|');
-                }
-            }
-            let bass = p.voice(Voice::Bass);
-            if ny > 0.71 {
-                for root in [0.32, 0.55, 0.78] {
-                    let growth = (0.96 - ny).max(0.0);
-                    for branch in [-1.0, 0.0, 1.0] {
-                        let stem = root
-                            + branch * growth * 0.42
-                            + (ny * 24.0 + l.phase(Voice::Bass)).sin() * 0.014;
-                        ink.layer(bass * ridge(nx - stem, 0.018 + bass * 0.014), 55.0, '#');
-                    }
-                }
-            }
-            let perc = p.voice(Voice::Perc);
-            for bubble in 0..5 {
-                let b = bubble as f32;
-                let cx = w * (0.83 + (b * 2.3).sin() * 0.09);
-                let cy = h * (0.92 - (b * 0.19 + l.phase(Voice::Perc) * 0.13).rem_euclid(0.85));
-                let distance = ((x - cx) / 2.0).hypot(y - cy);
-                let radius = scale * (0.025 + perc * 0.035);
-                ink.layer(perc * ridge(distance - radius, 0.8), -100.0, 'o');
-            }
-            let clap = p.voice(Voice::Clap);
-            let dx = (x - w * 0.77) / 2.0;
-            let dy = y - h * 0.73;
-            let distance = dx.hypot(dy);
-            let angle = dy.atan2(dx);
-            if dy < 0.0 {
-                let ribs = 0.4 + 0.6 * (angle * 9.0 + l.phase(Voice::Clap) * 2.0).cos().abs();
-                ink.layer(
-                    clap * ridge(distance, scale * (0.1 + clap * 0.16)) * ribs,
-                    110.0,
-                    '/',
-                );
-            }
-            let tonal = p.voice(Voice::Tonal);
-            let dx = (x - w * 0.41) / 2.0;
-            let dy = y - h * 0.69;
-            let angle = dy.atan2(dx);
-            let petal = 0.75 + 0.25 * (angle * 7.0 + l.phase(Voice::Tonal)).cos();
-            let radius = scale * (0.06 + tonal * 0.1) * petal;
-            ink.layer(tonal * ridge(dx.hypot(dy), radius), 10.0, '@');
-            ink.layer(tonal * 0.7 * ridge(dx.hypot(dy) - radius, 0.7), 10.0, '+');
-
-            let arp = p.voice(Voice::Arp);
-            for fish in 0..3 {
-                let f = fish as f32;
-                let cx = (0.31 + f * 0.18 + l.phase(Voice::Arp) * 0.045).rem_euclid(0.65) + 0.15;
-                let cy = 0.38 + f * 0.105;
-                let dx = (nx - cx) / (0.035 + arp * 0.055);
-                let dy = (ny - cy) / (0.025 + arp * 0.055);
-                ink.layer(
-                    arp * (1.0 - dx.abs() * 0.55 - dy.abs()).max(0.0),
-                    -145.0,
-                    '>',
-                );
-                if (-1.7..-0.7).contains(&dx) {
-                    ink.layer(arp * ridge(dy, (dx + 0.7).abs()), -145.0, '<');
-                }
-            }
-            let lead = p.voice(Voice::Lead);
-            let cx = 0.5 + l.phase(Voice::Lead).sin() * 0.07;
-            let dx = (nx - cx) / (0.12 + lead * 0.17);
-            let wing = 0.19 + dx.abs() * 0.06 * (l.phase(Voice::Lead) * 1.6).cos();
-            let body = ridge(ny - wing, (0.035 + lead * 0.09) * (1.0 - dx.abs()).max(0.0));
-            if dx.abs() < 1.0 {
-                ink.layer(lead * body, 155.0, '=');
-            }
-            if (0.19..0.38).contains(&ny) {
-                ink.layer(
-                    lead * ridge(
-                        nx - cx - (ny * 20.0 + l.phase(Voice::Lead)).sin() * 0.015,
-                        0.012,
-                    ),
-                    155.0,
-                    '~',
-                );
-            }
-            ink
+        let space = FieldSpace::new(area);
+        let centres = [
+            (0.50, 0.22),
+            (0.50, 0.80),
+            (0.16, 0.63),
+            (0.84, 0.63),
+            (0.18, 0.25),
+            (0.82, 0.25),
+            (0.50, 0.49),
+        ];
+        // Compute drift once per blob; only squared distances in the cell loop.
+        let blobs: [_; 7] = std::array::from_fn(|i| {
+            let voice = INSTRUMENTS[i];
+            let d = p.voice(voice);
+            let t = l.phase(voice) * 0.20;
+            let (cx, cy) = centres[i];
+            (
+                cx + t.sin() * 0.055,
+                cy + (t * 0.7).sin() * 0.04,
+                0.23 + d * 0.22,
+                d,
+            )
         });
-        l.kick(area, buf);
+        neon_field(area, buf, l, |x, y| {
+            let mut glow = l.atmosphere(x, y);
+            let lift = l.kick_field(space, x, y) * 0.06;
+            for (i, &(cx, cy, radius, drive)) in blobs.iter().enumerate() {
+                let dx = (x - cx) * space.w / (2.0 * space.scale);
+                let dy = (y + lift - cy) * space.h / space.scale;
+                let blob = (1.0 - (dx * dx + dy * dy) / (radius * radius)).max(0.0);
+                glow.add(
+                    drive * blob.powi(2) * 2.2,
+                    if i.is_multiple_of(2) {
+                        75.0 + i as f32 * 8.0
+                    } else {
+                        180.0
+                    },
+                );
+            }
+            // A soft isosurface makes overlapping lobes merge into luminous pools.
+            let tint = glow.tint();
+            glow.energy = (glow.energy - 0.035).max(0.0) * 1.4;
+            glow.offset = tint * glow.energy;
+            glow
+        });
     }
 }
 
 // ------------------------------------------------------------ City
 
-/// A night skyline: architecture, traffic and signals have separate owners.
+/// A dark skyline cuts into neon haze; windows and long beams cross its face.
 #[derive(Default)]
 pub struct City {
     layers: Layers,
@@ -1357,115 +1336,69 @@ impl Scene for City {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let l = &self.layers;
         let p = &l.pulse;
-        let w = area.width.max(1) as f32;
-        let h = area.height.max(1) as f32;
-        let scale = h.min(w / 2.0);
-        l.background(area, buf);
-        field(area, buf, p.hue(), |x, y| {
-            let (nx, ny) = (x / w, y / h);
-            let mut ink = Ink::default();
-            let pad = p.voice(Voice::Pad);
-            if ny < 0.73 {
-                for origin in [0.08, 0.92] {
-                    let reach = 0.73 - ny;
-                    let sweep = (l.phase(Voice::Pad) * 0.6 + origin * 5.0).sin() * 0.4;
-                    let beam = ridge(nx - origin - reach * sweep, reach * (0.09 + pad * 0.12));
-                    ink.layer(pad * beam * 0.7, -50.0, ':');
-                }
-            }
-            let bass = p.voice(Voice::Bass);
-            if (0.3..0.68).contains(&nx) && ny < 0.76 {
-                let block = ((nx - 0.3) * 24.0).floor();
-                let roof = 0.71 - bass * (0.23 + 0.21 * (block * 2.4).sin().abs())
-                    + (l.phase(Voice::Bass) + block).sin() * bass * 0.025;
-                if ny > roof {
-                    let edge = ((nx - 0.3) * 24.0).fract();
-                    ink.layer(
-                        bass * (0.6 + 0.3 * edge),
-                        45.0,
-                        if edge < 0.16 {
-                            '|'
-                        } else if (y as u16).is_multiple_of(3) {
-                            '='
-                        } else {
-                            '#'
-                        },
-                    );
-                }
-            }
-            let perc = p.voice(Voice::Perc);
-            for lane in 0..3 {
-                let lane = lane as f32;
-                let direction = if lane == 1.0 { -1.0 } else { 1.0 };
-                let car = (nx * 5.0 - l.phase(Voice::Perc) * direction * 1.8 + lane * 0.6)
-                    .rem_euclid(1.0);
-                let road = ridge(ny - (0.8 + lane * 0.065), 0.032);
-                ink.layer(perc * ridge(car - 0.5, 0.3) * road, -90.0, '=');
-                if car > 0.62 {
-                    ink.layer(perc * road, -90.0, '>');
-                }
-            }
-            let clap = p.voice(Voice::Clap);
-            for tower in [0.08, 0.92] {
-                let dx = (x - w * tower) / 2.0;
-                let dy = y - h * 0.4;
-                let r = scale * (0.04 + clap * 0.08);
-                let rays = (dy.atan2(dx) * 4.0 + l.phase(Voice::Clap) * 2.0)
-                    .cos()
-                    .abs();
-                ink.layer(
-                    clap * ridge(dx.hypot(dy) - r, 1.0) * (0.5 + rays * 0.5),
-                    115.0,
-                    '*',
-                );
-                if (0.4..0.74).contains(&ny) {
-                    ink.layer(clap * ridge(nx - tower, 0.017), 115.0, '!');
-                }
-            }
-            let tonal = p.voice(Voice::Tonal);
-            let dx = (x - w * 0.21) / 2.0;
-            let dy = y - h * 0.42;
-            let r = scale * (0.065 + tonal * 0.08);
-            let distance = dx.hypot(dy);
-            ink.layer(tonal * ridge(distance - r, 1.0), 0.0, 'O');
-            if distance < r {
-                let a = l.phase(Voice::Tonal) * 1.5;
-                let hand = ridge(dx * a.sin() - dy * a.cos(), 0.85);
-                ink.layer(tonal * hand, 0.0, '+');
-            }
-            if (0.48..0.75).contains(&ny) {
-                ink.layer(tonal * ridge(nx - 0.21, 0.06), 0.0, '|');
-            }
-            let arp = p.voice(Voice::Arp);
-            if (0.69..0.83).contains(&nx) && (0.28..0.75).contains(&ny) {
-                let col = ((nx - 0.69) * w / 3.0).floor();
-                let row = (ny * h / 2.0).floor();
-                let chase = 0.35 + 0.65 * (row - col - l.phase(Voice::Arp) * 4.0).cos().powi(2);
-                let window = if (x as u16).is_multiple_of(3) {
-                    '|'
-                } else {
-                    '+'
-                };
-                ink.layer(arp * chase, -140.0, window);
-            }
-            let lead = p.voice(Voice::Lead);
-            let cx = 0.5 + l.phase(Voice::Lead).sin() * 0.12;
-            let dx = (nx - cx) / (0.13 + lead * 0.08);
-            let dy = (ny - 0.16) / (0.045 + lead * 0.08);
-            ink.layer(lead * ridge(dx.hypot(dy), 1.0), 155.0, '@');
-            if nx < cx && nx > cx - 0.3 {
-                let tail = 0.16 + (nx * 30.0 - l.phase(Voice::Lead) * 3.0).sin() * 0.035;
-                ink.layer(lead * ridge(ny - tail, 0.03), 155.0, '~');
-            }
-            ink
+        let space = FieldSpace::new(area);
+        let bass = p.voice(Voice::Bass);
+        neon_field(area, buf, l, |x, y| {
+            let mut glow = l.atmosphere(x, y);
+            let block = (x * 11.0).floor();
+            let roof = 0.65 - (0.10 + bass * 0.25) * (0.4 + 0.6 * (block * 2.37).sin().abs())
+                + bass * (l.phase(Voice::Bass) * 0.25 + block).sin() * 0.035;
+            let facade =
+                ((y - roof) * space.h).clamp(0.0, 1.0) * ((0.85 - y) * space.h).clamp(0.0, 1.0);
+            let sky = ridge(y - 0.40, 0.58) * (1.0 - facade * 0.94);
+            glow.add(
+                p.voice(Voice::Pad)
+                    * sky
+                    * (0.65 + 0.25 * (x * 3.0 + l.phase(Voice::Pad) * 0.15).sin()),
+                95.0,
+            );
+            let edge = ridge((x * 11.0).fract() - 0.08, 0.10);
+            glow.add(
+                bass * (facade * (0.10 + edge * 0.8) + ridge(y - roof, 0.045) * 0.6),
+                180.0,
+            );
+            let windows = 0.5 + 0.5 * (y * 19.0 - block - l.phase(Voice::Arp) * 0.55).sin();
+            let threshold = bayer((x * space.w) as u16, (y * space.h) as u16);
+            glow.add(
+                p.voice(Voice::Arp) * facade * if windows > threshold { 0.95 } else { 0.08 },
+                30.0,
+            );
+            glow.add(
+                p.voice(Voice::Perc)
+                    * ridge(y - 0.88, 0.17)
+                    * (0.35 + 0.65 * (x * 17.0 - l.phase(Voice::Perc) * 1.4).sin().powi(2)),
+                180.0,
+            );
+            glow.add(
+                p.voice(Voice::Clap)
+                    * ridge(y - 0.66, 0.12)
+                    * (0.4 + 0.6 * (x * 10.0 + l.phase(Voice::Clap)).sin().powi(2)),
+                110.0,
+            );
+            glow.add(
+                p.voice(Voice::Tonal)
+                    * ridge(
+                        y - 0.17 - x * 0.18 - (l.phase(Voice::Tonal) * 0.16).sin() * 0.08,
+                        0.09,
+                    ),
+                180.0,
+            );
+            glow.add(
+                p.voice(Voice::Lead)
+                    * ridge(
+                        y - 0.37 + x * 0.22 - (l.phase(Voice::Lead) * 0.19).sin() * 0.08,
+                        0.08,
+                    ),
+                60.0,
+            );
+            glow
         });
-        l.kick(area, buf);
     }
 }
 
 // ------------------------------------------------------------ Atlas
 
-/// Seven named constellations. A bridge lights only while both ends play.
+/// Seven constellations. A bridge lights only while both ends play.
 #[derive(Default)]
 pub struct Atlas {
     layers: Layers,
@@ -1591,24 +1524,244 @@ impl Scene for Atlas {
             }
             ink
         });
-        for (i, &(voice, cx, cy)) in CLUSTERS.iter().enumerate() {
-            let (x, y) = if matches!(voice, Voice::Pad | Voice::Bass | Voice::Lead) {
-                ((cx * w + scale * 0.48) as u16, (cy * h) as u16)
-            } else {
-                (
-                    (cx * w - voice.name().len() as f32 * 0.5).max(0.0) as u16,
-                    (cy * h - scale * 0.16 - 1.0).max(0.0) as u16,
-                )
-            };
-            caption(
-                buf,
-                area,
-                (x, y),
-                voice.name(),
-                p.hue() + i as f32 * 32.0 - 90.0,
-            );
-        }
         l.kick(area, buf);
+    }
+}
+
+// ------------------------------------------------------------ Veil
+
+/// Half-row samples turn broad drifting light curtains into smooth gradients.
+#[derive(Default)]
+pub struct Veil {
+    layers: Layers,
+}
+
+/// Upper and lower samples have independent colours; unlit halves stay black.
+fn halfblock(buf: &mut Buffer, area: Rect, x: u16, y: u16, colours: [Color; 2]) {
+    buf[(area.x + x, area.y + y)]
+        .set_char('▀')
+        .set_style(Style::default().fg(colours[0]).bg(colours[1]));
+}
+
+impl Scene for Veil {
+    fn name(&self) -> &'static str {
+        "veil"
+    }
+    fn on_event(&mut self, event: &Event) {
+        self.layers.pulse.on_event(event);
+    }
+    fn tune(&mut self, sensitivity: Sensitivity) {
+        self.layers.pulse.sensitivity = sensitivity;
+    }
+    fn tick(&mut self, dt: f32) {
+        self.layers.tick(dt);
+    }
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let l = &self.layers;
+        let p = &l.pulse;
+        let space = FieldSpace::new(area);
+        let hue = p.hue() - 120.0;
+        let bands = [
+            (0.26, 0.0, 0.36, 90.0),
+            (0.85, 0.0, 0.24, 180.0),
+            (0.63, 0.32, 0.16, 0.0),
+            (0.60, -0.35, 0.16, 180.0),
+            (0.14, 0.12, 0.14, 25.0),
+            (0.39, -0.16, 0.13, 160.0),
+            (0.48, 0.20, 0.15, 110.0),
+        ];
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let colours = std::array::from_fn(|half| {
+                    let nx = (x as f32 + 0.5) / space.w;
+                    let ny = (y as f32 + half as f32 * 0.5 + 0.25) / space.h;
+                    let mut glow = l.atmosphere(nx, ny);
+                    for (i, voice) in INSTRUMENTS.iter().enumerate() {
+                        let (centre, slope, width, offset) = bands[i];
+                        let t = l.phase(*voice) * 0.22;
+                        let bend = (nx * (3.0 + i as f32) - t).sin() * 0.055;
+                        let distance = ny - centre - (nx - 0.5) * slope - bend;
+                        let coverage = ridge(distance, width);
+                        glow.add(p.voice(*voice) * coverage * coverage * 1.4, offset);
+                    }
+                    glow.add(l.kick_field(space, nx, ny) * 1.5, 180.0);
+                    hsv(hue + glow.tint(), 0.85, glow.value() * scanline(y))
+                });
+                halfblock(buf, area, x, y, colours);
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------ Ion
+
+/// Ordered dithering resolves slow nebula folds between shade-ramp steps.
+#[derive(Default)]
+pub struct Ion {
+    layers: Layers,
+}
+
+impl Scene for Ion {
+    fn name(&self) -> &'static str {
+        "ion"
+    }
+    fn on_event(&mut self, event: &Event) {
+        self.layers.pulse.on_event(event);
+    }
+    fn tune(&mut self, sensitivity: Sensitivity) {
+        self.layers.pulse.sensitivity = sensitivity;
+    }
+    fn tick(&mut self, dt: f32) {
+        self.layers.tick(dt);
+    }
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let l = &self.layers;
+        let p = &l.pulse;
+        let space = FieldSpace::new(area);
+        let folds: [_; 7] = std::array::from_fn(|i| {
+            let t = l.phase(INSTRUMENTS[i]) * 0.12;
+            let angle = i as f32 * 0.8 + t;
+            (angle.cos(), angle.sin(), t)
+        });
+        draw_field(
+            area,
+            buf,
+            l,
+            |x, y| {
+                let u = (x - 0.5) * space.w / (2.0 * space.scale);
+                let v = (y - 0.5) * space.h / space.scale;
+                let mut glow = l.atmosphere(x, y);
+                for (i, voice) in INSTRUMENTS.iter().enumerate() {
+                    let (cos, sin, t) = folds[i];
+                    let along = u * cos + v * sin;
+                    let across = v * cos - u * sin;
+                    let bend = (along * (4.0 + i as f32) - t).sin() * 0.13;
+                    let veil = ridge(across - bend - (i as f32 - 3.0) * 0.075, 0.24);
+                    let plasma = 0.3 + 0.7 * (along * 5.0 + t * 1.5).cos().powi(2);
+                    glow.add(
+                        p.voice(*voice) * veil * plasma,
+                        if i.is_multiple_of(2) {
+                            80.0 + i as f32 * 7.0
+                        } else {
+                            180.0
+                        },
+                    );
+                }
+                glow
+            },
+            dithered_shade,
+        );
+    }
+}
+
+// ------------------------------------------------------------ Echo
+
+/// A retained light field. Ticks decay and redraw it even while hidden.
+#[derive(Default)]
+pub struct Echo {
+    layers: Layers,
+    // The app sizes hidden scenes before ticking. Direct render callers can
+    // also initialise this cache; repeated renders never advance time.
+    trails: RefCell<TrailFrame>,
+}
+
+#[derive(Default)]
+struct TrailFrame {
+    size: (u16, u16),
+    cells: Vec<Glow>,
+}
+
+impl TrailFrame {
+    fn redraw(&mut self, layers: &Layers, dt: f32) {
+        let area = Rect::new(0, 0, self.size.0, self.size.1);
+        let space = FieldSpace::new(area);
+        let radii = [0.46, 0.66, 0.56, 0.34, 0.24, 0.16, 0.40];
+        let brushes: [_; 7] = std::array::from_fn(|i| {
+            let voice = INSTRUMENTS[i];
+            (
+                radii[i],
+                layers.phase(voice) * 0.28,
+                layers.pulse.voice(voice),
+            )
+        });
+        let decay = (1.0 - dt / 1.4).max(0.0);
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let nx = x as f32 / space.w;
+                let ny = y as f32 / space.h;
+                let u = (nx - 0.5) * space.w / (2.0 * space.scale);
+                let v = (ny - 0.45) * space.h / space.scale;
+                let radius = (u * u + v * v).sqrt();
+                let angle = v.atan2(u);
+                let mut fresh = layers.atmosphere(nx, ny);
+                for (i, &(orbit, phase, drive)) in brushes.iter().enumerate() {
+                    let curl = (angle * 2.0 + phase).sin() * 0.075;
+                    let ribbon = ridge(radius - orbit - curl, 0.075 + drive * 0.04);
+                    let sweep = 0.35 + 0.65 * (angle + phase + i as f32).cos().powi(2);
+                    fresh.add(
+                        drive * ribbon * sweep,
+                        if i.is_multiple_of(2) {
+                            85.0 + i as f32 * 6.0
+                        } else {
+                            180.0
+                        },
+                    );
+                }
+                fresh.add(layers.kick_field(space, nx, ny) * 1.5, 180.0);
+                let old =
+                    &mut self.cells[usize::from(y) * usize::from(area.width) + usize::from(x)];
+                old.energy *= decay;
+                old.offset *= decay;
+                if fresh.energy >= old.energy {
+                    *old = fresh;
+                }
+            }
+        }
+    }
+}
+
+impl Echo {
+    fn prepare(&self, area: Rect) {
+        let mut trails = self.trails.borrow_mut();
+        if trails.size != (area.width, area.height) {
+            trails.size = (area.width, area.height);
+            trails.cells.clear();
+            trails.cells.resize(
+                usize::from(area.width) * usize::from(area.height),
+                Glow::default(),
+            );
+            trails.redraw(&self.layers, 0.0);
+        }
+    }
+}
+
+impl Scene for Echo {
+    fn name(&self) -> &'static str {
+        "echo"
+    }
+    fn on_event(&mut self, event: &Event) {
+        self.layers.pulse.on_event(event);
+    }
+    fn tune(&mut self, sensitivity: Sensitivity) {
+        self.layers.pulse.sensitivity = sensitivity;
+    }
+    fn tick(&mut self, dt: f32) {
+        self.layers.tick(dt);
+        self.trails.get_mut().redraw(&self.layers, dt);
+    }
+    fn resize(&mut self, area: Rect) {
+        self.prepare(area);
+    }
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.prepare(area);
+        let trails = self.trails.borrow();
+        let hue = self.layers.pulse.hue() - 120.0;
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let glow = trails.cells[usize::from(y) * usize::from(area.width) + usize::from(x)];
+                shade(buf, area, x, y, glow.value(), hue + glow.tint());
+            }
+        }
     }
 }
 
@@ -1700,6 +1853,14 @@ mod tests {
         scene.tick(0.5);
     }
 
+    fn visibly_different(a: &ratatui::buffer::Cell, b: &ratatui::buffer::Cell) -> bool {
+        if a.symbol() == " " && b.symbol() == " " {
+            a.bg != b.bg
+        } else {
+            a != b
+        }
+    }
+
     #[test]
     fn new_scenes_show_each_voice_alone_and_in_the_mix() {
         for (w, h) in [(60, 20), (120, 40)] {
@@ -1713,7 +1874,7 @@ mod tests {
                     let changed_rows = (area.y..area.bottom())
                         .filter(|&y| {
                             (area.x..area.right())
-                                .any(|x| active[(x, y)].symbol() != silent[(x, y)].symbol())
+                                .any(|x| visibly_different(&active[(x, y)], &silent[(x, y)]))
                         })
                         .count();
                     assert!(
@@ -1733,7 +1894,7 @@ mod tests {
                         .content
                         .iter()
                         .zip(&without.content)
-                        .filter(|(a, b)| a.symbol() != b.symbol())
+                        .filter(|(a, b)| visibly_different(a, b))
                         .count();
                     assert!(
                         changed >= 3,
@@ -1818,25 +1979,203 @@ mod tests {
     fn new_scenes_share_kick_motion_and_hide_zero_hits() {
         let area = Rect::new(0, 0, 60, 20);
         for age in [0.0, 0.2, 0.8, 1.5, 2.1] {
-            let mut expected = None;
-            for mut scene in all().into_iter().skip(5) {
+            for index in 5..all().len() {
+                let mut scene = all().remove(index);
                 let silent = frame(scene.as_ref(), area);
                 scene.on_event(&Event::Kick(0.0));
                 assert_eq!(silent, frame(scene.as_ref(), area));
                 scene.on_event(&Event::Kick(0.7));
                 scene.tick(age);
-                let mut actual = frame(scene.as_ref(), area);
-                for (cell, before) in actual.content.iter_mut().zip(&silent.content) {
-                    if cell == before {
-                        *cell = ratatui::buffer::Cell::default();
-                    }
+                let actual = frame(scene.as_ref(), area);
+                let mut replay = all().remove(index);
+                replay.on_event(&Event::Kick(0.0));
+                replay.on_event(&Event::Kick(0.7));
+                replay.tick(age);
+                assert_eq!(
+                    actual,
+                    frame(replay.as_ref(), area),
+                    "{} kick is not repeatable",
+                    scene.name()
+                );
+                if age < Pulse::LIFETIME {
+                    assert_ne!(actual, silent, "{} hides kick at {age}", scene.name());
+                } else {
+                    assert_eq!(actual, silent, "{} never settles", scene.name());
                 }
-                if let Some(ref expected) = expected {
-                    assert_eq!(expected, &actual, "{} differs at {age}", scene.name());
-                }
-                expected = Some(actual);
             }
         }
+    }
+
+    #[test]
+    fn new_scenes_keep_order_and_explorations_follow_atlas() {
+        let names: Vec<_> = all().iter().map(|scene| scene.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "fluid", "system", "binary", "tide", "rain", "estuary", "loom", "reef", "city",
+                "atlas", "veil", "ion", "echo"
+            ]
+        );
+    }
+
+    #[test]
+    fn new_scenes_kick_field_is_round_anchored_and_level_scaled() {
+        for (w, h) in [(60, 20), (120, 40), (200, 60)] {
+            let space = FieldSpace::new(Rect::new(0, 0, w, h));
+            let mut layers = Layers::default();
+            layers.pulse.on_event(&Event::Kick(0.8));
+            let hit = &layers.pulse.live[0];
+            let cx = 0.5 + hit.wobble.0 / space.w;
+            let cy = 1.0 + hit.wobble.1 / space.h;
+            assert!((layers.kick_field(space, cx, cy) - 0.8).abs() < 1e-5);
+            layers.tick(0.5);
+            let radius = 0.3 * space.scale;
+            let right = layers.kick_field(space, cx + radius * 2.0 / space.w, cy);
+            let above = layers.kick_field(space, cx, cy - radius / space.h);
+            assert!((right - above).abs() < 1e-5, "2:1 cell aspect");
+            assert!(above > 0.5);
+            layers.pulse.live[0].level = 0.4;
+            assert!(
+                (layers.kick_field(space, cx, cy - radius / space.h) * 2.0 - above).abs() < 1e-5
+            );
+            layers.pulse.live[0].level = 0.0;
+            assert_eq!(layers.kick_field(space, cx, cy - radius / space.h), 0.0);
+        }
+    }
+
+    #[test]
+    fn new_scenes_halfblocks_and_dither_resolve_subcell_gradients() {
+        let area = Rect::new(3, 2, 60, 20);
+        let mut veil = Veil::default();
+        play(&mut veil, &Voice::ALL);
+        let rendered = frame(&veil, area);
+        assert!(
+            rendered
+                .content
+                .iter()
+                .filter(|cell| cell.symbol() == "▀" && cell.fg != cell.bg)
+                .count()
+                > 600
+        );
+        let tile = Rect::new(0, 0, 4, 4);
+        let mut buf = Buffer::empty(tile);
+        for y in 0..4 {
+            for x in 0..4 {
+                dithered_shade(&mut buf, tile, x, y, 0.375, 200.0);
+                assert_eq!(bayer(x, y), bayer(x + 4, y + 4));
+            }
+        }
+        assert_eq!(buf.content.iter().filter(|c| c.symbol() == "░").count(), 8);
+        assert_eq!(buf.content.iter().filter(|c| c.symbol() == "▒").count(), 8);
+    }
+
+    #[test]
+    fn new_scenes_echo_retains_decays_and_updates_hidden_frames() {
+        let area = Rect::new(3, 2, 60, 20);
+        let mut echo = Echo::default();
+        echo.resize(area);
+        echo.on_event(&Event::Kick(0.8));
+        echo.tick(0.1);
+        let lit = frame(&echo, area);
+        assert_eq!(lit, frame(&echo, area), "render must not decay trails");
+        // Stop excitation without discarding the frame: only the retained ring remains.
+        echo.layers.pulse.live.clear();
+        echo.tick(0.1);
+        let retained: f32 = echo.trails.borrow().cells.iter().map(|c| c.energy).sum();
+        assert!(retained > 1.0);
+        let mut fresh = Echo::default();
+        assert_ne!(frame(&echo, area), frame(&fresh, area));
+        for _ in 0..30 {
+            echo.tick(0.1);
+        }
+        let faded: f32 = echo.trails.borrow().cells.iter().map(|c| c.energy).sum();
+        assert!(faded < retained * 0.15);
+        // Hidden ticks and visible ticks produce the same state.
+        play(&mut echo, &Voice::ALL);
+        play(&mut fresh, &Voice::ALL);
+        echo.tick(3.0);
+        fresh.tick(3.0);
+        for _ in 0..10 {
+            echo.tick(0.1);
+            fresh.tick(0.1);
+            frame(&fresh, area);
+        }
+        assert_eq!(frame(&echo, area), frame(&fresh, area));
+        for size in [(1, 1), (0, 20), (120, 40), (60, 20)] {
+            let area = Rect::new(3, 2, size.0, size.1);
+            frame(&echo, area);
+            echo.tick(0.1);
+            frame(&echo, area);
+            assert_eq!(
+                echo.trails.borrow().cells.len(),
+                usize::from(size.0) * usize::from(size.1)
+            );
+        }
+    }
+
+    /// Run explicitly for visual review and debug frame timing; writes cell dumps
+    /// under the OS temporary directory, without adding production scene I/O.
+    #[test]
+    #[ignore = "visual review and debug timing"]
+    fn new_scenes_render_review() {
+        use std::fmt::Write;
+        use std::time::Instant;
+        let directory = std::env::temp_dir().join("foorm-review");
+        std::fs::create_dir_all(&directory).unwrap();
+        for (width, height) in [(60, 20), (120, 40), (200, 60)] {
+            let area = Rect::new(0, 0, width, height);
+            let mut scenes = all();
+            for scene in &mut scenes {
+                play(scene.as_mut(), &Voice::ALL);
+                scene.on_event(&chord(1, 0.1, 1.0));
+                frame(scene.as_ref(), area);
+            }
+            for index in [5, 6, 7, 8, 10, 11, 12] {
+                let mut durations = Vec::new();
+                let mut buffer = Buffer::empty(area);
+                for step in 0usize..70 {
+                    let start = Instant::now();
+                    for scene in &mut scenes {
+                        if step.is_multiple_of(15) {
+                            scene.on_event(&Event::Kick(0.65));
+                        }
+                        scene.tick(1.0 / 30.0);
+                    }
+                    buffer.reset();
+                    scenes[index].render(area, &mut buffer);
+                    if step >= 10 {
+                        durations.push(start.elapsed());
+                    }
+                }
+                durations.sort();
+                eprintln!(
+                    "{} {width}x{height}: tick-all + render p95 {:.2} ms",
+                    scenes[index].name(),
+                    durations[57].as_secs_f64() * 1000.0
+                );
+                let mut dump = format!("{width} {height}\n");
+                for cell in &buffer.content {
+                    let rgb = |colour| match colour {
+                        Color::Rgb(r, g, b) => (r, g, b),
+                        _ => (0, 0, 0),
+                    };
+                    let (r, g, b) = rgb(cell.fg);
+                    let (br, bg, bb) = rgb(cell.bg);
+                    writeln!(
+                        dump,
+                        "{} {r} {g} {b} {br} {bg} {bb}",
+                        cell.symbol().chars().next().unwrap() as u32
+                    )
+                    .unwrap();
+                }
+                std::fs::write(
+                    directory.join(format!("{}-{width}.cells", scenes[index].name())),
+                    dump,
+                )
+                .unwrap();
+            }
+        }
+        eprintln!("renders: {}", directory.display());
     }
 
     #[test]
