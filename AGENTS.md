@@ -21,8 +21,10 @@ The OSC address vocabulary is the only contract between them.
 - `src/gesture.rs` — `Gestures`: nooise's live gestures (`/nooise/gesture/<name>`)
   as a grade over the finished frame, one look per gesture (Bloom glow, Lift
   brighten and sweep the floor, Submerge darken and sink to blue, Echo
-  trails). Two sources, the larger wins: local `z x c v`
-  holds with nooise's rise and return times (`press`/`release`, or `toggle`
+  trails). Foreground and any painted RGB background are graded as separate
+  layers, so a half-block's lower sample answers too. Two sources, the larger
+  wins: local `z x c v` holds with nooise's rise and return times
+  (`press`/`release`, or `toggle`
   where the terminal reports no releases), and nooise's mirrored amounts,
   already enveloped. Two held gestures crossfade by relative amount; they
   never stack.

@@ -81,5 +81,7 @@ foorm consumes the nooise contract documented in nooise's `src/fluid/osc.rs`:
   (`pad`, `perc`, `bass`, `kick`, `tonal`, `clap`, `arp`, `lead`)
 - `/nooise/chord` `i32 f32 f32` chord index, pad attack and release seconds
 - `/nooise/voice/kick` `f32` kick level
+- `/nooise/gesture/<gesture>` `f32` live gesture amount 0..1
+  (`bloom`, `submerge`, `echo`, `lift`)
 
 Anything else is counted as unknown and shown in settings.

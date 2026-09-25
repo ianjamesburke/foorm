@@ -44,8 +44,10 @@ struct Local {
 pub struct Gestures {
     local: [Local; Gesture::ALL.len()],
     osc: [f32; Gesture::ALL.len()],
-    /// Last graded frame, for Echo trails; sized to the last area.
+    /// Last graded foreground and background, for Echo trails; sized to the
+    /// last area.
     echo: Vec<Hsv>,
+    echo_bg: Vec<Hsv>,
     echo_size: (u16, u16),
 }
 
@@ -111,70 +113,96 @@ impl Gestures {
     }
 
     pub fn apply(&mut self, area: Rect, buf: &mut Buffer) {
-        let w = self.weights();
         let (cols, rows) = (area.width as usize, area.height as usize);
         if self.echo_size != (area.width, area.height) {
             self.echo = vec![(0.0, 0.0, 0.0); cols * rows];
+            self.echo_bg = vec![(0.0, 0.0, 0.0); cols * rows];
             self.echo_size = (area.width, area.height);
         }
-        let idle = w.iter().all(|&a| a <= 0.0);
-        let src: Vec<Hsv> = (0..rows)
-            .flat_map(|y| (0..cols).map(move |x| (x, y)))
-            .map(|(x, y)| read(&buf[(area.x + x as u16, area.y + y as u16)]))
+        let cells: Vec<(u16, u16)> = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (area.x + x, area.y + y)))
             .collect();
-        if idle {
-            self.echo.copy_from_slice(&src);
+        let fg: Vec<Hsv> = cells.iter().map(|&c| read(buf[c].fg)).collect();
+        let bg: Vec<Hsv> = cells.iter().map(|&c| read(buf[c].bg)).collect();
+        let w = self.weights();
+        if w.iter().all(|&a| a <= 0.0) {
+            self.echo = fg;
+            self.echo_bg = bg;
             return;
         }
-        let bloom = w[Gesture::Bloom as usize];
-        let lift = w[Gesture::Lift as usize];
-        let submerge = w[Gesture::Submerge as usize];
-        let echo = w[Gesture::Echo as usize];
-        for y in 0..rows {
-            for x in 0..cols {
-                let (mut h, mut s, mut v) = src[y * cols + x];
-                if bloom > 0.0 {
-                    let mut glow: f32 = 0.0;
-                    for dy in y.saturating_sub(1)..=(y + 1).min(rows - 1) {
-                        for dx in x.saturating_sub(2)..=(x + 2).min(cols - 1) {
-                            if (dx, dy) != (x, y) {
-                                let n = src[dy * cols + dx];
-                                if n.2 > glow {
-                                    glow = n.2;
-                                    if v <= 0.0 {
-                                        h = n.0;
-                                    }
+        self.echo = grade(w, &fg, &self.echo, cols, rows);
+        self.echo_bg = grade(w, &bg, &self.echo_bg, cols, rows);
+        for (i, &c) in cells.iter().enumerate() {
+            let cell = &mut buf[c];
+            // Only a painted background is a second sample (a half-block's
+            // lower half); a terminal-default one stays unpainted.
+            let painted = matches!(cell.bg, Color::Rgb(..));
+            write(cell, self.echo[i]);
+            if painted {
+                let (h, s, v) = self.echo_bg[i];
+                cell.set_bg(hsv(h, s, v));
+            }
+        }
+    }
+}
+
+/// One colour layer (foreground or background) graded by the weights; `prev`
+/// is that layer's last graded frame, for Echo trails.
+fn grade(
+    w: [f32; Gesture::ALL.len()],
+    src: &[Hsv],
+    prev: &[Hsv],
+    cols: usize,
+    rows: usize,
+) -> Vec<Hsv> {
+    let bloom = w[Gesture::Bloom as usize];
+    let lift = w[Gesture::Lift as usize];
+    let submerge = w[Gesture::Submerge as usize];
+    let echo = w[Gesture::Echo as usize];
+    let mut out = Vec::with_capacity(src.len());
+    for y in 0..rows {
+        for x in 0..cols {
+            let (mut h, mut s, mut v) = src[y * cols + x];
+            if bloom > 0.0 {
+                let mut glow: f32 = 0.0;
+                for dy in y.saturating_sub(1)..=(y + 1).min(rows - 1) {
+                    for dx in x.saturating_sub(2)..=(x + 2).min(cols - 1) {
+                        if (dx, dy) != (x, y) {
+                            let n = src[dy * cols + dx];
+                            if n.2 > glow {
+                                glow = n.2;
+                                if v <= 0.0 {
+                                    h = n.0;
                                 }
                             }
                         }
                     }
-                    v = v.max(glow * 0.8 * bloom);
-                    s *= 1.0 - 0.3 * bloom;
                 }
-                if lift > 0.0 {
-                    let floor = y as f32 / rows.max(1) as f32;
-                    v += (1.0 - v) * 0.5 * lift;
-                    v *= 1.0 - 0.8 * lift * floor * floor;
-                    h += 45.0 * lift;
-                }
-                if submerge > 0.0 {
-                    v *= 1.0 - 0.55 * submerge;
-                    h = lerp_hue(h, 215.0, submerge);
-                    s += (1.0 - s) * 0.5 * submerge;
-                }
-                if echo > 0.0 {
-                    let prev = self.echo[y * cols + x];
-                    let trail = prev.2 * 0.93 * echo;
-                    if trail > v {
-                        (h, s, v) = (prev.0, prev.1, trail);
-                    }
-                }
-                let out = (h, s, v.clamp(0.0, 1.0));
-                self.echo[y * cols + x] = out;
-                write(&mut buf[(area.x + x as u16, area.y + y as u16)], out);
+                v = v.max(glow * 0.8 * bloom);
+                s *= 1.0 - 0.3 * bloom;
             }
+            if lift > 0.0 {
+                let floor = y as f32 / rows.max(1) as f32;
+                v += (1.0 - v) * 0.5 * lift;
+                v *= 1.0 - 0.8 * lift * floor * floor;
+                h += 45.0 * lift;
+            }
+            if submerge > 0.0 {
+                v *= 1.0 - 0.55 * submerge;
+                h = lerp_hue(h, 215.0, submerge);
+                s += (1.0 - s) * 0.5 * submerge;
+            }
+            if echo > 0.0 {
+                let before = prev[y * cols + x];
+                let trail = before.2 * 0.93 * echo;
+                if trail > v {
+                    (h, s, v) = (before.0, before.1, trail);
+                }
+            }
+            out.push((h, s, v.clamp(0.0, 1.0)));
         }
     }
+    out
 }
 
 fn lerp_hue(from: f32, to: f32, k: f32) -> f32 {
@@ -185,10 +213,10 @@ fn lerp_hue(from: f32, to: f32, k: f32) -> f32 {
     from + d * k
 }
 
-/// The hue, saturation, and value a cell was painted with; an unlit or
-/// non-RGB cell reads as black.
-fn read(cell: &ratatui::buffer::Cell) -> Hsv {
-    let Color::Rgb(r, g, b) = cell.fg else {
+/// The hue, saturation, and value a colour was painted with; an unlit or
+/// non-RGB colour reads as black.
+fn read(colour: Color) -> Hsv {
+    let Color::Rgb(r, g, b) = colour else {
         return (0.0, 0.0, 0.0);
     };
     let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
@@ -290,14 +318,14 @@ mod tests {
         let mut buf = lit_frame(area);
         g.on_event(&Event::Gesture(Gesture::Submerge, 1.0));
         g.apply(area, &mut buf);
-        assert!(read(&buf[mid]).2 < 0.5, "submerge darkens");
+        assert!(read(buf[mid].fg).2 < 0.5, "submerge darkens");
 
         g.on_event(&Event::Gesture(Gesture::Submerge, 0.0));
         g.on_event(&Event::Gesture(Gesture::Bloom, 1.0));
         let mut buf = lit_frame(area);
-        assert_eq!(read(&buf[above]).2, 0.0);
+        assert_eq!(read(buf[above].fg).2, 0.0);
         g.apply(area, &mut buf);
-        assert!(read(&buf[above]).2 > 0.5, "bloom lights the neighbour");
+        assert!(read(buf[above].fg).2 > 0.5, "bloom lights the neighbour");
 
         g.on_event(&Event::Gesture(Gesture::Bloom, 0.0));
         g.on_event(&Event::Gesture(Gesture::Echo, 1.0));
@@ -305,12 +333,34 @@ mod tests {
         g.apply(area, &mut buf);
         let mut dark = Buffer::empty(area);
         g.apply(area, &mut dark);
-        assert!(read(&dark[mid]).2 > 0.5, "echo keeps last frame's cells");
+        assert!(read(dark[mid].fg).2 > 0.5, "echo keeps last frame's cells");
 
         g.on_event(&Event::Gesture(Gesture::Echo, 0.0));
         let mut dark = Buffer::empty(area);
         g.apply(area, &mut dark);
-        assert_eq!(read(&dark[mid]).2, 0.0, "idle grade leaves the frame alone");
+        assert_eq!(
+            read(dark[mid].fg).2,
+            0.0,
+            "idle grade leaves the frame alone"
+        );
+    }
+
+    #[test]
+    fn half_block_backgrounds_are_graded_and_default_backgrounds_stay_unpainted() {
+        let area = Rect::new(0, 0, 6, 3);
+        let mut buf = Buffer::empty(area);
+        let lower = hsv(200.0, 0.7, 0.8);
+        buf[(2, 1)]
+            .set_char('▀')
+            .set_style(Style::default().fg(hsv(200.0, 0.7, 0.8)).bg(lower));
+        let mut g = Gestures::default();
+        g.on_event(&Event::Gesture(Gesture::Submerge, 1.0));
+        g.apply(area, &mut buf);
+        assert!(
+            read(buf[(2, 1)].bg).2 < 0.5,
+            "submerge darkens the lower half"
+        );
+        assert_eq!(buf[(3, 1)].bg, Color::Reset, "unpainted background stays");
     }
 
     #[test]
