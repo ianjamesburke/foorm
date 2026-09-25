@@ -268,7 +268,7 @@ impl App {
             Line::from(format!("kicks    {}", self.kicks)),
             Line::from(format!("unknown  {}", self.unknown)),
             Line::from(format!("last     {last}")),
-            Line::from("z x c v b gestures   Tab/s close   t tune   q quit")
+            Line::from("z x c v gestures   Tab/s close   t tune   q quit")
                 .alignment(Alignment::Right),
         ];
         f.render_widget(Clear, panel);

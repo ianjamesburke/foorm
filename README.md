@@ -36,10 +36,9 @@ Switch with `1`-`9` and `0` (atlas), `n`/`p`, or the arrow keys.
 `Tab` or `s` opens the settings overlay (listen address, scene, beat,
 per-voice levels, message counts, last message). `q` or `Ctrl+C` quits.
 
-Gestures: hold `z` Bloom, `x` Lift, `c` Submerge, `v` Echo, or `b` Thin,
-the same keys as nooise. Bloom glows outward, Lift brightens and sweeps the
-floor away, Submerge darkens and sinks to blue, Echo leaves trails, Thin
-drops cells to a lattice. A held key rises at nooise's speed and returns in
+Gestures: hold `z` Bloom, `x` Lift, `c` Submerge, or `v` Echo, the same
+keys as nooise. Bloom glows outward, Lift brightens and sweeps the floor
+away, Submerge darkens and sinks to blue, Echo leaves trails. A held key rises at nooise's speed and returns in
 50 ms on release; in a terminal that reports no key releases a press toggles
 the hold instead, and the settings overlay says so. Gestures held in nooise
 arrive over OSC too and the larger of the two amounts wins, so one hand on
