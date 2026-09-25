@@ -1,10 +1,10 @@
 //! Live gestures mirrored from nooise (`/nooise/gesture/<name>`), applied as
 //! a grade over the finished frame so every scene answers the same key the
 //! same way: Bloom glows, Lift brightens and sweeps the floor away, Submerge
-//! darkens and sinks the palette, Echo trails, Thin drops cells to a lattice.
+//! darkens and sinks the palette, Echo trails.
 //!
 //! A gesture has two sources and takes the larger: foorm's own keys (the same
-//! `z x c v b` as nooise, with nooise's rise and return times so the two feel
+//! `z x c v` as nooise, with nooise's rise and return times so the two feel
 //! alike) and nooise's mirrored amounts, already enveloped by its audio clock
 //! so a gesture played there rises and returns exactly with its sound. Two
 //! gestures held at once crossfade by their relative amounts rather than
@@ -27,7 +27,6 @@ fn rise_seconds(gesture: Gesture) -> f32 {
         Gesture::Bloom => 1.5,
         Gesture::Submerge => 1.2,
         Gesture::Echo => 0.7,
-        Gesture::Thin => 1.0,
         Gesture::Lift => 0.55,
     }
 }
@@ -131,7 +130,6 @@ impl Gestures {
         let lift = w[Gesture::Lift as usize];
         let submerge = w[Gesture::Submerge as usize];
         let echo = w[Gesture::Echo as usize];
-        let thin = w[Gesture::Thin as usize];
         for y in 0..rows {
             for x in 0..cols {
                 let (mut h, mut s, mut v) = src[y * cols + x];
@@ -170,9 +168,6 @@ impl Gestures {
                     if trail > v {
                         (h, s, v) = (prev.0, prev.1, trail);
                     }
-                }
-                if thin > 0.0 && (x % 2 == 1 || y % 2 == 1) {
-                    v *= 1.0 - thin;
                 }
                 let out = (h, s, v.clamp(0.0, 1.0));
                 self.echo[y * cols + x] = out;

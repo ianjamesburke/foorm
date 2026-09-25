@@ -58,16 +58,14 @@ pub enum Gesture {
     Bloom,
     Submerge,
     Echo,
-    Thin,
     Lift,
 }
 
 impl Gesture {
-    pub const ALL: [Gesture; 5] = [
+    pub const ALL: [Gesture; 4] = [
         Gesture::Bloom,
         Gesture::Submerge,
         Gesture::Echo,
-        Gesture::Thin,
         Gesture::Lift,
     ];
 
@@ -76,7 +74,6 @@ impl Gesture {
             Gesture::Bloom => "bloom",
             Gesture::Submerge => "submerge",
             Gesture::Echo => "echo",
-            Gesture::Thin => "thin",
             Gesture::Lift => "lift",
         }
     }
@@ -86,7 +83,6 @@ impl Gesture {
             Gesture::Bloom => 'z',
             Gesture::Submerge => 'c',
             Gesture::Echo => 'v',
-            Gesture::Thin => 'b',
             Gesture::Lift => 'x',
         }
     }
@@ -218,6 +214,10 @@ mod tests {
                     args: vec![OscType::Float(0.4)],
                 }),
                 OscPacket::Message(OscMessage {
+                    addr: "/nooise/gesture/thin".into(),
+                    args: vec![OscType::Float(0.5)],
+                }),
+                OscPacket::Message(OscMessage {
                     addr: "/other".into(),
                     args: vec![],
                 }),
@@ -238,6 +238,7 @@ mod tests {
                 Event::Kick(0.8),
                 Event::VoiceLevel(Voice::Bass, 0.15),
                 Event::Gesture(Gesture::Lift, 0.4),
+                Event::Unknown("/nooise/gesture/thin".into()),
                 Event::Unknown("/other".into())
             ]
         );
